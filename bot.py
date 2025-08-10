@@ -1,20 +1,42 @@
 import asyncio
+import re
+import html
 from telegram import Bot
 from telegram.error import TelegramError
 from config import BOT_TOKEN, CHANNEL_ID
 from parser import fetch_news
 from database import init_db, is_news_new, mark_as_published
 
+def clean_html(raw_html):
+    """Удаляет все HTML-теги и преобразует HTML-сущности"""
+    if not raw_html:
+        return ""
+    
+    # Удаляем все теги
+    clean_text = re.sub(r'<[^>]+>', '', raw_html)
+    
+    # Заменяем HTML-сущности (например, &amp; → &)
+    clean_text = html.unescape(clean_text)
+    
+    # Удаляем лишние пробелы
+    return re.sub(r'\s+', ' ', clean_text).strip()
+
 async def post_to_channel(bot, news_item):
     try:
-        # Форматируем сообщение с HTML-разметкой
+        # Очищаем описание от HTML
+        clean_description = clean_html(news_item['description'])
+
+        if len(clean_description) > 3000:
+            clean_description = clean_description[:3000] + "..."
+        
+        # Форматируем сообщение
         message = (
-            f"<b>🚨 {news_item['title']}</b>\n\n"
-            f"{news_item['description']}\n\n"
-            f"<a href='{news_item['link']}'>Читать полностью</a>"
-            f"<br><br>FireFeed лишь агрегатор. Права на материалы принадлежат Reuters"
+            f"🔥 <b>{html.escape(news_item['title'])}</b>\n\n"
+            f"{clean_description}\n\n"
+            f"⚡ <a href='{news_item['link']}'>Читать полностью</a>"
         )
         
+        # Отправляем с HTML-разметкой
         await bot.send_message(
             chat_id=CHANNEL_ID,
             text=message,
