@@ -7,20 +7,24 @@ CACHE_EXPIRY = 300  # 5 минут
 def init_db():
     conn = sqlite3.connect('news.db')
     cursor = conn.cursor()
+    
+    # Таблица для опубликованных новостей
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS published_news (
             id TEXT PRIMARY KEY,
             published_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-
-    # Новая таблица для пользователей и их подписок
+    
+    # Таблица настроек пользователя (обновленная)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS user_preferences (
             user_id INTEGER PRIMARY KEY,
-            subscriptions TEXT  -- JSON-строка с категориями
+            subscriptions TEXT,
+            language TEXT DEFAULT 'en'
         )
     ''')
+    
     conn.commit()
     conn.close()
 
@@ -52,7 +56,6 @@ def get_user_preferences(user_id):
     return []
 
 def save_user_preferences(user_id, categories):
-    """Сохраняем настройки пользователя"""
     conn = sqlite3.connect('news.db')
     cursor = conn.cursor()
     subscriptions = json.dumps(categories)
@@ -85,3 +88,45 @@ def get_cached_preferences(user_id):
     }
     return prefs
 
+def get_user_language(user_id):
+    conn = sqlite3.connect('news.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT language FROM user_preferences WHERE user_id=?", (user_id,))
+    result = cursor.fetchone()
+    conn.close()
+    return result[0] if result else 'en'  # Возвращаем 'en' по умолчанию
+
+def set_user_language(user_id, lang_code):
+    conn = sqlite3.connect('news.db')
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT OR REPLACE INTO user_preferences (user_id, language)
+        VALUES (?, ?)
+    ''', (user_id, lang_code))
+    conn.commit()
+    conn.close()
+
+
+def migrate_db():
+    """Добавляем новые колонки в существующую базу"""
+    conn = sqlite3.connect('news.db')
+    cursor = conn.cursor()
+    
+    try:
+        # Проверяем существование колонки 'language'
+        cursor.execute("PRAGMA table_info(user_preferences)")
+        columns = [col[1] for col in cursor.fetchall()]
+        
+        if 'language' not in columns:
+            cursor.execute("ALTER TABLE user_preferences ADD COLUMN language TEXT DEFAULT 'en'")
+            print("✅ Добавлена колонка 'language'")
+            
+        # Можно добавить проверку для других колонок
+        # if 'new_column' not in columns: ...
+        cursor.execute("UPDATE user_preferences SET language = 'en' WHERE language IS NULL")
+            
+        conn.commit()
+    except sqlite3.Error as e:
+        print(f"⚠️ Ошибка миграции: {e}")
+    finally:
+        conn.close()
