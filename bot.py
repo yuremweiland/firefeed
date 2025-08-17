@@ -2,7 +2,15 @@ import asyncio
 import re
 import html
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.error import TelegramError, BadRequest
+from telegram.error import (
+    NetworkError,
+    BadRequest,
+    TimedOut,
+    RetryAfter,
+    Forbidden,
+    Conflict,
+    ChatMigrated
+)
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from config import BOT_TOKEN, CHANNEL_ID, FIRE_EMOJI, CATEGORIES
 from parser import fetch_news
@@ -137,6 +145,16 @@ async def show_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
+    try:
+        # Попытка подтвердить обработку callback
+        await query.answer(text="Loading...")
+    except BadRequest as e:
+        if "Query is too old" in str(e):
+            print(f"Ignoring outdated callback: {e}")
+            return  # Прекращаем обработку
+        else:
+            raise  # Пробрасываем другие ошибки
+
     await query.answer()
     user_id = query.from_user.id
     
@@ -271,7 +289,7 @@ async def monitor_news_task(context: ContextTypes.DEFAULT_TYPE):
             for news in new_news:
                 asyncio.create_task(post_to_channel(context.bot, news))
                 asyncio.create_task(send_personal_news(context.bot, news))
-                await asyncio.sleep(8)
+                await asyncio.sleep(5)
     except Exception as e:
         print(f"⚠️ Ошибка мониторинга: {e}")
 
@@ -358,9 +376,17 @@ async def debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"⚡ Получено сообщение: {update.message.text}")
     await update.message.reply_text("Бот активен!")
 
-async def error_handler(update, context):
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Используем импортированные классы ошибок
     if isinstance(context.error, NetworkError):
-        print(f"Сетевая ошибка: {context.error}")
+        print("Network error detected. Retrying...")
+        # Логика обработки сетевой ошибки
+
+    # Добавьте обработку для BadRequest (особенно для устаревших запросов)
+    elif isinstance(context.error, BadRequest):
+        if "Query is too old" in str(context.error):
+            print("Ignoring outdated callback query")
+            return  # Проигнорировать ошибку
     else:
         print(f"Другая ошибка: {context.error}")
 
