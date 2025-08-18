@@ -1,29 +1,42 @@
-import sqlite3
+import mysql.connector
 import json
 from functools import lru_cache
 import time
 
+DB_CONFIG = {
+    'host': "localhost",
+    'user': "firefeed_db_usr",
+    'password': "AixLUaCqe68v9oO8",
+    'database': "firefeed_db",
+    'charset': "utf8mb4"
+}
+
 USER_CACHE = {}
 CACHE_EXPIRY = 300  # 5 минут
 
+def get_connection():
+    """Создает и возвращает соединение с MySQL"""
+    return mysql.connector.connect(**DB_CONFIG)
+
 def init_db():
-    conn = sqlite3.connect('news.db')
+    """Инициализация структуры базы данных"""
+    conn = get_connection()
     cursor = conn.cursor()
     
-    # Таблица для опубликованных новостей
+    # Таблица для опубликованных новостей (id изменен на VARCHAR)
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS published_news (
-            id TEXT PRIMARY KEY,
+            id VARCHAR(255) PRIMARY KEY,
             published_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     
-    # Таблица настроек пользователя (обновленная)
+    # Таблица настроек пользователя
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS user_preferences (
-            user_id INTEGER PRIMARY KEY,
-            subscriptions TEXT,
-            language TEXT DEFAULT 'en'
+            user_id BIGINT PRIMARY KEY,
+            subscriptions VARCHAR(255),
+            language VARCHAR(2) DEFAULT 'en'
         )
     ''')
     
@@ -31,31 +44,39 @@ def init_db():
     conn.close()
 
 def is_news_new(news_id: str) -> bool:
-    conn = sqlite3.connect('news.db')
+    """Проверяет новость более эффективно"""
+    conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT 1 FROM published_news WHERE id=?", (news_id,))
-    exists = cursor.fetchone() is not None
+    
+    # Используем EXISTS для оптимальной проверки
+    cursor.execute("SELECT NOT EXISTS(SELECT 1 FROM published_news WHERE id = %s)", (news_id,))
+    is_new = cursor.fetchone()[0]  # Вернет 1 если новости нет, 0 если есть
+    
     conn.close()
-    return not exists
+    return bool(is_new)
 
 def mark_as_published(news_id: str):
-    conn = sqlite3.connect('news.db')
+    """Помечает новость как опубликованную с использованием INSERT IGNORE"""
+    conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("INSERT INTO published_news (id) VALUES (?)", (news_id,))
+    
+    # Используем INSERT IGNORE для пропуска дубликатов
+    cursor.execute("INSERT IGNORE INTO published_news (id) VALUES (%s)", (news_id,))
+    
     conn.commit()
     conn.close()
 
 def get_user_settings(user_id):
     """Возвращает все настройки пользователя"""
-    conn = sqlite3.connect('news.db')
+    conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT subscriptions, language FROM user_preferences WHERE user_id=?", (user_id,))
+    cursor.execute("SELECT subscriptions, language FROM user_preferences WHERE user_id = %s", (user_id,))
     result = cursor.fetchone()
     conn.close()
     
     if result:
         return {
-            "subscriptions": json.loads(result[0]),
+            "subscriptions": json.loads(result[0]) if result[0] else [],
             "language": result[1]
         }
     return {
@@ -65,13 +86,16 @@ def get_user_settings(user_id):
 
 def save_user_settings(user_id, subscriptions, language):
     """Сохраняет все настройки пользователя"""
-    conn = sqlite3.connect('news.db')
+    conn = get_connection()
     cursor = conn.cursor()
     
+    # Используем ON DUPLICATE KEY UPDATE вместо INSERT OR REPLACE
     cursor.execute('''
-        INSERT OR REPLACE INTO user_preferences 
-        (user_id, subscriptions, language) 
-        VALUES (?, ?, ?)
+        INSERT INTO user_preferences (user_id, subscriptions, language)
+        VALUES (%s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+            subscriptions = VALUES(subscriptions),
+            language = VALUES(language)
     ''', (user_id, json.dumps(subscriptions), language))
     
     conn.commit()
@@ -79,7 +103,7 @@ def save_user_settings(user_id, subscriptions, language):
 
 def get_all_users():
     """Получаем список всех пользователей"""
-    conn = sqlite3.connect('news.db')
+    conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT user_id FROM user_preferences")
     user_ids = [row[0] for row in cursor.fetchall()]
@@ -87,6 +111,7 @@ def get_all_users():
     return user_ids
 
 def get_cached_preferences(user_id):
+    """Кеширование настроек пользователя"""
     if user_id in USER_CACHE and time.time() - USER_CACHE[user_id]['timestamp'] < CACHE_EXPIRY:
         return USER_CACHE[user_id]['preferences']
     
@@ -111,23 +136,22 @@ def get_user_language(user_id):
     return get_user_settings_cached(user_id)["language"]
 
 def set_user_language(user_id, lang_code):
-    conn = sqlite3.connect('news.db')
+    """Устанавливает язык пользователя"""
+    conn = get_connection()
     cursor = conn.cursor()
     cursor.execute('''
-        INSERT OR REPLACE INTO user_preferences (user_id, language)
-        VALUES (?, ?)
+        INSERT INTO user_preferences (user_id, language)
+        VALUES (%s, %s)
+        ON DUPLICATE KEY UPDATE language = VALUES(language)
     ''', (user_id, lang_code))
     conn.commit()
     conn.close()
 
-import json
-import sqlite3
-
 def get_subscribers_for_category(category):
-    conn = sqlite3.connect('news.db')
+    """Получает подписчиков для определенной категории"""
+    conn = get_connection()
     cursor = conn.cursor()
     
-    # Получаем всех пользователей
     cursor.execute('''
         SELECT user_id, subscriptions, language 
         FROM user_preferences
@@ -138,10 +162,8 @@ def get_subscribers_for_category(category):
         user_id, subscriptions_json, language = row
         
         try:
-            # Преобразуем JSON-строку в Python-объект
-            subscriptions_list = json.loads(subscriptions_json)
+            subscriptions_list = json.loads(subscriptions_json) if subscriptions_json else []
             
-            # Проверяем подписки пользователя
             if 'all' in subscriptions_list or category in subscriptions_list:
                 user = {
                     'id': user_id,
@@ -150,7 +172,6 @@ def get_subscribers_for_category(category):
                 subscribers.append(user)
                 
         except json.JSONDecodeError:
-            # Обработка невалидного JSON
             print(f"Invalid JSON for user {user_id}: {subscriptions_json}")
             continue
     

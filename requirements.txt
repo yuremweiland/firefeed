@@ -1,4 +1,7 @@
 python-telegram-bot[job-queue]==22.3
+python-telegram-bot[webhooks]==22.3
+feedparser==6.0.11
 deep-translator==1.11.4
-tenacity=9.1.2
-mysql-connector-python=9.4.0
+tenacity==9.1.2
+mysql-connector-python==9.4.0
+pytz==2025.2

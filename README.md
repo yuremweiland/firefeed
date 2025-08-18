@@ -4,8 +4,7 @@
 
 ## Установка и зависимости
 
-pip install "python-telegram-bot[job-queue]"
-pip install deep_translator
+pip install -r requirements.txt
 
 ## Запуск
 

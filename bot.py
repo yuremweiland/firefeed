@@ -1,3 +1,4 @@
+import os
 import asyncio
 import re
 import html
@@ -387,7 +388,7 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
         print(f"Другая ошибка: {context.error}")
 
 def main():
-    """Точка входа с использованием JobQueue"""
+    """Точка входа с использованием Webhooks"""
     application = Application.builder().token(BOT_TOKEN).build()
     init_db()
     
@@ -403,11 +404,18 @@ def main():
     job_queue.run_repeating(
         callback=monitor_news_task, 
         interval=60,
-        first=1  # запустить через 1 секунду после старта
+        first=1
     )
+
+    print("🟢 Бот запущен в режиме Webhook")
     
-    print("🟢 Бот запущен. Ожидаем команды и мониторим новости...")
-    application.run_polling()
+    # Запускаем webhook
+    application.run_webhook(
+        listen='127.0.0.1',
+        port=5000,
+        url_path='webhook',
+        webhook_url='https://firefeed.net/webhook'
+    )
 
 if __name__ == "__main__":
-     main()
+    main()
