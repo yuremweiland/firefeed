@@ -1,5 +1,4 @@
 from deep_translator import GoogleTranslator
-# Установите: pip install deep-translator
 
 def translate_text(text, target_lang, source_lang='auto'):
     try:

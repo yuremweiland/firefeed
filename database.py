@@ -1,6 +1,7 @@
 import sqlite3
 import json
 from functools import lru_cache
+import time
 
 USER_CACHE = {}
 CACHE_EXPIRY = 300  # 5 минут
@@ -64,19 +65,6 @@ def get_user_settings(user_id):
 
 def save_user_settings(user_id, subscriptions, language):
     """Сохраняет все настройки пользователя"""
-    conn = sqlite3.connect('news.db')
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        INSERT OR REPLACE INTO user_preferences 
-        (user_id, subscriptions, language) 
-        VALUES (?, ?, ?)
-    ''', (user_id, json.dumps(subscriptions), language))
-    
-    conn.commit()
-    conn.close()
-
-def save_user_preferences(user_id, categories):
     conn = sqlite3.connect('news.db')
     cursor = conn.cursor()
     

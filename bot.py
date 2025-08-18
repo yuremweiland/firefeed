@@ -5,16 +5,12 @@ from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import (
     NetworkError,
     BadRequest,
-    TimedOut,
-    RetryAfter,
-    Forbidden,
-    Conflict,
-    ChatMigrated
+    TelegramError
 )
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from config import BOT_TOKEN, CHANNEL_ID, FIRE_EMOJI, CATEGORIES
 from parser import fetch_news
-from database import init_db, is_news_new, mark_as_published, get_user_settings, save_user_settings, get_subscribers_for_category, get_user_preferences, save_user_preferences, get_all_users, get_user_language, set_user_language
+from database import init_db, is_news_new, mark_as_published, get_user_settings, save_user_settings, get_subscribers_for_category, get_user_preferences, get_user_language, set_user_language
 from translator import translate_text
 from functools import lru_cache
 from tenacity import retry, stop_after_attempt, wait_exponential
@@ -301,24 +297,24 @@ async def send_personal_news(bot, news_item):
     
     for user in subscribers:
         try:
+            # Очищаем HTML
+            clean_title = clean_html(news_item['title'])
+            clean_description = clean_html(news_item['description'])
+
             # Переводим если нужно
             if user['language_code'] != news_item['lang']:
-                title = translate_text(news_item['title'], user['language_code'])
-                description = translate_text(news_item['description'], user['language_code'])
+                title = translate_text(clean_title, user['language_code'])
+                description = translate_text(clean_description, user['language_code'])
                 lang_note = f"\n\n🌐 {TRANSLATED_FROM_LABELS[user['language_code']]} {news_item['lang'].upper()}"
             else:
                 title = news_item['title']
                 description = news_item['description']
                 lang_note = ""
             
-            # Очищаем HTML
-            clean_title = clean_html(title)
-            clean_description = clean_html(description)
-            
             # Форматируем сообщение
             message = (
-                f"🔥 <b>{clean_title}</b>\n\n"
-                f"{clean_description}\n\n"
+                f"🔥 <b>{title}</b>\n\n"
+                f"{description}\n\n"
                 f"FROM: {news_item['source']}\n"
                 f"CATEGORY: {news_item['category']}{lang_note}\n\n"
                 f"⚡ <a href='{news_item['link']}'>{READ_MORE_LABELS[user['language_code']]}</a>"
@@ -406,7 +402,7 @@ def main():
     job_queue = application.job_queue
     job_queue.run_repeating(
         callback=monitor_news_task, 
-        interval=30,
+        interval=60,
         first=1  # запустить через 1 секунду после старта
     )
     
