@@ -339,9 +339,18 @@ async def send_personal_news(bot, news_item):
        wait=wait_exponential(multiplier=1, min=2, max=30))
 async def post_to_channel(bot, news_item):
     try:
-        # Очищаем описание от HTML
-        clean_title = clean_html(news_item['title'])
-        clean_description = clean_html(news_item['description'])
+        DEFAULT_CHANNEL_LANGUAGE = 'ru'
+
+        # Переводим если нужно
+        if news_item['lang'] != '':
+            title = translate_text(clean_title, DEFAULT_CHANNEL_LANGUAGE)
+            description = translate_text(clean_description, DEFAULT_CHANNEL_LANGUAGE)
+            lang_note = f"\n\n🌐 {TRANSLATED_FROM_LABELS[DEFAULT_CHANNEL_LANGUAGE]} {news_item['lang'].upper()}"
+        else:
+            title = news_item['title']
+            description = news_item['description']
+            lang_note = ""
+
         hashtags = f"\n#firefeed_{news_item['category']} #firefeed_{news_item['source']}"
 
         title = clean_title
@@ -350,7 +359,7 @@ async def post_to_channel(bot, news_item):
         # Проверяем наличие и содержание description у новости
         has_description = description and description.strip()
 
-        message = f"{FIRE_EMOJI} <b>{title}</b>"
+        message = f"<b>{title}</b>"
 
         if has_description:
             message += f"\n\n{description}"
