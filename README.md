@@ -1,29 +1,37 @@
 # FireFeed - AI-powered newsfeed
 
-Тут будет нормальное описание
+Новостной агрегатор с поддержкой AI
 
-## Установка и зависимости
+Официальный сайт - https://firefeed.net
 
+## Установка зависимостей перед запуском
+
+```bash
 pip install -r requirements.txt
+```
 
 ## Запуск
 
 ### Запуск через команды
 
+```bash
 python -m venv venv
 source venv/bin/activate
 python bot.py
+```
 
 ### Запуск через bash-скрипт
 
+```bash
 chmod +x ./run_bot.sh
 ./run_bot.sh
+```
 
 ### Запуск через systemd-юнит
 
 Пример файла сервиса:
 
-```
+```bash
 [Unit]
 Description=FireFeed Telegram Bot Service
 After=network.target
@@ -52,7 +60,7 @@ WantedBy=multi-user.target
 
 Пример конфигурации nginx для работы через webhook:
 
-```
+```lua
     location /webhook {
         proxy_pass http://127.0.0.1:5000/webhook;
         proxy_set_header Host $host;
