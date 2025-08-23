@@ -5,6 +5,7 @@ import asyncio
 import torch
 import nltk
 import os
+from config import CHANNEL_IDS
 
 # Установка пути для данных NLTK
 nltk_data_path = '/var/www/firefeed/data/nltk_data'
@@ -96,7 +97,7 @@ def cached_translate_text(text, source_lang, target_lang):
 
 def translate_text(text, source_lang='en', target_lang='ru', context_window=2):
     if source_lang == target_lang:
-        return text
+        return clean_html(text)
 
     cache_key = f"{source_lang}_{target_lang}_{hash(text)}"
     if cache_key in _translation_cache:
@@ -120,3 +121,76 @@ def translate_text(text, source_lang='en', target_lang='ru', context_window=2):
 
     _translation_cache[cache_key] = result
     return result
+
+async def prepare_translations(title: str, description: str, category: str, original_lang: str) -> dict:
+    """
+    Подготавливает переводы заголовка, описания и категории на все целевые языки.
+
+    :param title: Оригинальный заголовок.
+    :param description: Оригинальное описание.
+    :param category: Категория (предположительно на английском).
+    :param original_lang: Оригинальный язык новости.
+    :return: Словарь переводов вида {
+        'ru': {'title': '...', 'description': '...', 'category': '...'},
+        'en': {...},
+        ...
+    }
+    """
+    translations = {}
+    target_languages = list(CHANNEL_IDS.keys()) # ['ru', 'en', 'de', 'fr']
+
+    # Очищаем оригинальный текст один раз
+    clean_title = clean_html(title)
+    clean_description = clean_html(description)
+
+    tasks = [] # Для параллельного выполнения переводов
+
+    for target_lang in target_languages:
+        # Копируем оригинальные данные на случай, если перевод не нужен или произойдет ошибка
+        trans_title = clean_title
+        trans_description = clean_description
+        trans_category = category
+
+        needs_translation = original_lang != target_lang
+
+        if needs_translation:
+            # Создаем задачи для асинхронного перевода
+            # title_task = asyncio.create_task(translate_text_async(clean_title, original_lang, target_lang))
+            # desc_task = asyncio.create_task(translate_text_async(clean_description, original_lang, target_lang))
+            # cat_task = asyncio.create_task(translate_text_async(category, 'en', target_lang)) # Предполагаем, что категория на английском
+            # tasks.append((target_lang, title_task, desc_task, cat_task))
+            
+            # --- Если translate_text НЕ асинхронная, делаем последовательно ---
+            try:
+                trans_title = translate_text(clean_title, original_lang, target_lang)
+                trans_description = translate_text(clean_description, original_lang, target_lang)
+                # Переводим категорию, если она не на целевом языке (предполагаем en как базовый для категорий)
+                trans_category = translate_text(category, 'en', target_lang) 
+
+            except Exception as e:
+                print(f"[ERROR] Ошибка перевода на {target_lang}: {e}. Используются оригинальные данные.")
+                # В случае ошибки перевода, используем оригинальные данные
+                
+        # Сохраняем результаты (или оригинальные данные) для этого языка
+        translations[target_lang] = {
+            'title': trans_title,
+            'description': trans_description,
+            'category': trans_category
+        }
+        
+    # --- Если бы translate_text была async, использовали бы gather ---
+    # results = await asyncio.gather(*(task[1] for task in tasks), return_exceptions=True)
+    # for i, (target_lang, _, _, _) in enumerate(tasks):
+    #     if isinstance(results[i], Exception):
+    #          print(f"[ERROR] Ошибка перевода на {target_lang}: {results[i]}. Используются оригинальные данные.")
+    #          # Используем оригинальные данные
+    #     else:
+    #         # Предполагаем, что результаты возвращаются в том же порядке
+    #         title_res, desc_res, cat_res = results[i] # Нужно адаптировать возврат из translate_text_async
+    #         translations[target_lang] = {
+    #             'title': title_res,
+    #             'description': desc_res,
+    #             'category': cat_res
+    #         }
+
+    return translations

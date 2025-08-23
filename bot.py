@@ -3,15 +3,11 @@ import signal
 import sys
 import asyncio
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
-from telegram.error import (
-    NetworkError,
-    BadRequest,
-    TelegramError
-)
+from telegram.error import NetworkError, BadRequest, TelegramError
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
-from config import BOT_TOKEN, FIRE_EMOJI, CHANNEL_IDS
+from config import WEBHOOK_CONFIG, BOT_TOKEN, FIRE_EMOJI, CHANNEL_IDS
 from user_manager import UserManager
-from translator import translate_text
+from translator import translate_text, prepare_translations
 from functools import lru_cache
 from tenacity import retry, stop_after_attempt, wait_exponential
 from rss_manager import RSSManager
@@ -624,36 +620,83 @@ async def change_language_command(update: Update, context: ContextTypes.DEFAULT_
 
 @retry(stop=stop_after_attempt(5), 
        wait=wait_exponential(multiplier=1, min=2, max=30))
-async def send_personal_news(bot, news_item):
-    user_manager = UserManager()
-    print(f"[LOG] Отправка персональной новости: {news_item['title'][:50]}...")
-    subscribers = user_manager.get_subscribers_for_category(news_item['category'])
-    print(f"[LOG] Найдено {len(subscribers)} подписчиков для категории {news_item['category']}")
+async def send_personal_news(bot, news_item: dict, translations_dict: dict):
+    """
+    Отправляет персональные новости подписчикам на основе их подписок и языка.
+    Использует заранее подготовленные переводы.
+
+    :param bot: Экземпляр бота python-telegram-bot.
+    :param news_item: Словарь с оригинальными данными новости.
+    :param translations_dict: Словарь переводов, полученный из prepare_translations.
+                              Формат: {'ru': {'title': '...', 'description': '...', 'category': '...'}, ...}
+    """
+    # Предполагаем, что UserManager доступен
+    # Если он находится в другом модуле, импортируйте его
+    # from your_user_module import UserManager 
+    user_manager = UserManager() 
     
+    original_title = news_item['title']
+    print(f"[LOG] Отправка персональной новости: {original_title[:50]}...")
+    
+    category = news_item.get('category')
+    if not category:
+        print("[WARN] Категория новости не указана. Персональная рассылка пропущена.")
+        return
+
+    subscribers = user_manager.get_subscribers_for_category(category)
+    print(f"[LOG] Найдено {len(subscribers)} подписчиков для категории {category}")
+    
+    if not subscribers:
+        print(f"[LOG] Нет подписчиков для категории {category}.")
+        return
+
     for user in subscribers:
         try:
-            clean_title = clean_html(news_item['title'])
-            clean_description = clean_html(news_item['description'])
-
-            if user['language_code'] != news_item['lang']:
-                title = translate_text(clean_title, news_item['lang'], user['language_code'])
-                description = translate_text(clean_description, news_item['lang'], user['language_code'])
-                lang_note = f"\n\n🌐 {TRANSLATED_FROM_LABELS[user['language_code']]} {news_item['lang'].upper()}"
-            else:
-                title = news_item['title']
-                description = news_item['description']
-                lang_note = ""
+            user_id = user['id']
+            user_lang = user.get('language_code', 'en') # Получаем язык пользователя, по умолчанию 'en'
             
+            # --- Получение переведенного контента ---
+            # 1. Пытаемся получить перевод для языка пользователя
+            translation_data = translations_dict.get(user_lang)
+            
+            if translation_data and isinstance(translation_data, dict):
+                # Используем готовый перевод
+                title_to_send = translation_data.get('title', original_title)
+                description_to_send = translation_data.get('description', news_item.get('description', ''))
+                # category_to_send = translation_data.get('category', category) # Если нужно
+            else:
+                # 2. Если перевод для языка пользователя отсутствует или поврежден,
+                #    используем оригинальные данные
+                print(f"[WARN] Перевод для языка '{user_lang}' не найден или некорректен для новости '{original_title[:30]}...'. Отправляем оригинал.")
+                title_to_send = original_title
+                description_to_send = news_item.get('description', '')
+                # category_to_send = category # Если нужно
+            
+            # --- Очистка HTML (если еще не очищена на этапе перевода) ---
+            # Предполагается, что очистка уже была выполнена в prepare_translations.
+            # Если нет, раскомментируйте строки ниже:
+            # title_to_send = clean_html(title_to_send) 
+            # description_to_send = clean_html(description_to_send)
+
+            # --- Формирование примечания о переводе ---
+            lang_note = ""
+            original_news_lang = news_item.get('lang', '')
+            if user_lang != original_news_lang:
+                 lang_note = f"\n\n🌐 {TRANSLATED_FROM_LABELS.get(user_lang, 'Translated from')} {original_news_lang.upper()}"
+
+            # --- Формирование сообщения ---
+            # Используем .get() с дефолтными значениями для надежности
             message = (
-                f"🔥 <b>{title}</b>\n\n"
-                f"{description}\n\n"
-                f"FROM: {news_item['source']}\n"
-                f"CATEGORY: {news_item['category']}{lang_note}\n\n"
-                f"⚡ <a href='{news_item['link']}'>{READ_MORE_LABELS[user['language_code']]}</a>"
+                f"🔥 <b>{title_to_send}</b>\n\n"
+                f"{description_to_send}\n\n"
+                f"FROM: {news_item.get('source', 'Unknown Source')}\n"
+                f"CATEGORY: {category}{lang_note}\n\n" # Используем оригинальную категорию или category_to_send
+                f"⚡ <a href='{news_item.get('link', '#')}'>{READ_MORE_LABELS.get(user_lang, 'Read more')}</a>"
             )
 
+            # --- Отправка сообщения ---
             await bot.send_message(
-                chat_id=user['id'],
+                chat_id=user_id,
                 text=message,
                 parse_mode="HTML",
                 disable_web_page_preview=False,
@@ -662,50 +705,65 @@ async def send_personal_news(bot, news_item):
                 connect_timeout=30
             )
             
-            await asyncio.sleep(0.1)
+            print(f"[LOG] Персональная новость отправлена пользователю {user_id}.")
+            await asyncio.sleep(0.1) # Небольшая задержка между отправками
             
-        except Exception as e:
-            print(f"[ERROR] Ошибка отправки новости пользователю {user['id']}: {e}")
+        except KeyError as e:
+            print(f"[ERROR] Отсутствует ключ в данных пользователя {user.get('id', 'Unknown ID')}: {e}")
+        except Exception as e: # Более общий перехватчик
+            print(f"[ERROR] Ошибка отправки персональной новости пользователю {user.get('id', 'Unknown ID')}: {e}")
 
 @retry(stop=stop_after_attempt(5), 
        wait=wait_exponential(multiplier=1, min=2, max=30))
-async def post_to_channel(bot, news_item):
-    print(f"[LOG] Публикация новости в каналы: {news_item['title'][:50]}...")
-    original_lang = news_item['lang']
-    
+async def post_to_channel(bot, news_item: dict, translations_dict: dict):
+    """
+    Публикует новость в Telegram-каналы, используя готовые переводы.
+
+    :param bot: Экземпляр бота python-telegram-bot.
+    :param news_item: Словарь с оригинальными данными новости 
+                      (title, description, lang, category, source, link).
+    :param translations_dict: Словарь переводов, полученный из prepare_translations.
+    """
+    original_title = news_item['title']
+    print(f"[LOG] Публикация новости в каналы: {original_title[:50]}...")
+
     for target_lang, channel_id in CHANNEL_IDS.items():
         try:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.5) # По-прежнему нужно для соблюдения лимитов Telegram
 
-            clean_title = clean_html(news_item['title'])
-            clean_description = clean_html(news_item['description'])
+            # Получаем готовые переводы
+            translation_data = translations_dict.get(target_lang, {})
+            if not translation_data:
+                 print(f"[WARN] Нет данных перевода для языка {target_lang}. Пропущено.")
+                 continue # Или используем оригинальные данные?
 
-            needs_translation = original_lang != target_lang
+            title = translation_data.get('title', original_title)
+            description = translation_data.get('description', news_item.get('description', ''))
+            translated_category = translation_data.get('category', news_item.get('category', ''))
+
+            # --- Логика формирования сообщения ---
+            original_lang = news_item['lang']
+            needs_translation_note = original_lang != target_lang
             
-            if needs_translation:
-                title = translate_text(clean_title, original_lang, target_lang)
-                description = translate_text(clean_description, original_lang, target_lang)
-                lang_note = f"\n\n🌐 {TRANSLATED_FROM_LABELS[target_lang]} {original_lang.upper()}"
-            else:
-                title = clean_title
-                description = clean_description
-                lang_note = ""
+            lang_note = ""
+            if needs_translation_note:
+                # Получаем название оригинального языка, если нужно
+                # Например, TRANSLATED_FROM_LABELS.get(target_lang, "Translated from")
+                lang_note = f"\n\n🌐 {TRANSLATED_FROM_LABELS.get(target_lang, 'Translated from')} {original_lang.upper()}"
 
-            if needs_translation and news_item.get('category_lang', 'en') != target_lang:
-                translated_category = translate_text(news_item['category'], 'en', target_lang)
-            else:
-                translated_category = news_item['category']
-                
-            hashtags = f"\n#{translated_category} #{news_item['source']}"
+            # --- Формирование хэштегов ---
+            # Предполагаем, что source и category доступны в news_item
+            hashtags = f"\n#{translated_category} #{news_item.get('source', 'UnknownSource')}"
             
-            has_description = description and description.strip()
+            has_description = bool(description and description.strip())
+            
+            # --- Сборка сообщения ---
             message = f"<b>{title}</b>"
-
             if has_description:
                 message += f"\n\n{description}"
+            message += f"{lang_note}\n{hashtags}" # Добавляем всегда, даже без описания?
 
-            message += f"{lang_note}\n{hashtags}" if has_description else f"{lang_note}\n{hashtags}"
-            
+            # --- Отправка ---
             await bot.send_message(
                 chat_id=channel_id,
                 text=message,
@@ -720,6 +778,8 @@ async def post_to_channel(bot, news_item):
             
         except TelegramError as e:
             print(f"[ERROR] Ошибка отправки в {channel_id}: {e}")
+        except KeyError as e:
+            print(f"[ERROR] Отсутствует ключ в данных для {target_lang}: {e}")
         except Exception as e:
             print(f"[ERROR] Неожиданная ошибка для {target_lang}: {e}")
 
@@ -741,6 +801,58 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     else:
         print(f"[ERROR] Другая ошибка: {context.error}")
 
+
+async def monitor_news_task(context):
+        """Асинхронная задача мониторинга новостей"""
+        print("[LOG] Запуск задачи мониторинга новостей")
+        rss_manager = RSSManager()
+
+        try:
+            news_list = await asyncio.wait_for(rss_manager.fetch_news(), timeout=120)
+            print(f"[LOG] Получено {len(news_list)} новостей")
+            
+            for i, news in enumerate(news_list[:20]):
+                try:
+                    # 2. Готовим переводы
+                    translations = await prepare_translations(
+                        title=news['title'],
+                        description=news['description'],
+                        category=news['category'], # Предполагаем, что категория на 'en' или передаем category_lang
+                        original_lang=news['lang']
+                    )
+
+                    # 3. Сохраняем в БД
+                    success_db = rss_manager.mark_as_published(
+                        title=news['title'],
+                        content=news['description'], # Или другое поле, если есть full_text
+                        url=news['link'], # или другой ключ для URL
+                        original_language=news['lang'],
+                        translations_dict=translations,
+                        category=news['category']
+                    )
+
+                    if success_db:
+                        print("[MAIN] Данные новости успешно сохранены в БД.")
+                        # Публикуем в Telegram КАНАЛЫ
+                        asyncio.create_task(post_to_channel(context.bot, news, translations))
+                        # Отправляем персональные новости ПОЛЬЗОВАТЕЛЯМ
+                        asyncio.create_task(send_personal_news(context.bot, news, translations))
+                    else:
+                        print("[MAIN] Ошибка сохранения данных в БД. Публикация в Telegram пропущена.")
+                    
+                    if i % 5 == 0:
+                        await asyncio.sleep(5)
+                        
+                except Exception as e:
+                    print(f"[ERROR] Ошибка обработки новости: {e}")
+                    continue
+                            
+        except asyncio.TimeoutError:
+            print("[ERROR] Таймаут получения новостей")
+        except Exception as e:
+            print(f"[ERROR] Ошибка в задаче мониторинга: {e}")
+
+
 def main():
     print("[LOG] Запуск бота")
     rss_manager = RSSManager()
@@ -757,7 +869,7 @@ def main():
     job_queue = application.job_queue
     if job_queue:
         job_queue.run_repeating(
-            callback=rss_manager.monitor_news_task, 
+            callback=monitor_news_task, 
             interval=300,
             first=1,
             job_kwargs={'misfire_grace_time': 600}
@@ -776,12 +888,7 @@ def main():
     print("[LOG] Бот запущен в режиме Webhook")
     
     try:
-        application.run_webhook(
-            listen='127.0.0.1',
-            port=5000,
-            url_path='webhook',
-            webhook_url='https://firefeed.net/webhook'
-        )
+        application.run_webhook(**WEBHOOK_CONFIG)
     except KeyboardInterrupt:
         print("[LOG] Прервано пользователем, закрываем соединения...")
         rss_manager = RSSManager()

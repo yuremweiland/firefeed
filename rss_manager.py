@@ -8,6 +8,7 @@ import pytz
 from datetime import datetime
 from dateutil import parser
 from config import DB_CONFIG, MAX_ENTRIES_PER_FEED, MAX_TOTAL_NEWS
+from translator import prepare_translations
 
 class RSSManager:
     def __init__(self):
@@ -255,15 +256,26 @@ class RSSManager:
         finally:
             cursor.close()
 
-    def mark_as_published(self, title, content, url):
+    def mark_as_published(self, title: str, content: str, url: str, original_language: str, translations_dict: dict, category: str = None):
         """
-        Сохраняет информацию о опубликованной новости с проверкой уникальности
-        Не учитывает дату публикации для определения уникальности
+        Сохраняет информацию о опубликованной новости с проверкой уникальности (хэши).
+        Сохраняет оригинальные данные и переводы новости для API.
+
+        :param title: Оригинальный заголовок новости.
+        :param content: Оригинальное содержимое новости.
+        :param url: URL источника новости.
+        :param original_language: Язык оригинальной новости (например, 'en').
+        :param translations_dict: Словарь переводов, полученный из prepare_translations.
+                                Формат: {'ru': {'title': '...', 'description': '...', 'category': '...'}, ...}
+        :param category: Категория новости (оригинальная, например, на английском).
+        :return: True, если успешно, иначе False.
         """
+        import hashlib # Убедитесь, что импортировано
+
         title_hash = hashlib.sha256(title.encode('utf-8')).hexdigest()
-        content_hash = hashlib.sha256(content[:500].encode('utf-8')).hexdigest()
+        content_hash = hashlib.sha256(content[:500].encode('utf-8')).hexdigest() # Используем оригинальный content
         
-        # Генерируем ID на основе хешей, без учета даты публикации
+        # Генерируем ID на основе хешей
         news_id = f"{title_hash}_{content_hash}"
         
         connection = self.get_db_connection()
@@ -273,24 +285,70 @@ class RSSManager:
         try:
             cursor = connection.cursor()
             
-            # Используем ON DUPLICATE KEY UPDATE для обработки дубликатов
-            query = """
+            # 1. Вставка или обновление в таблице хэшей (существующая логика)
+            query_published_news = """
             INSERT INTO published_news (id, title_hash, content_hash, source_url, published_at)
             VALUES (%s, %s, %s, %s, NOW())
             ON DUPLICATE KEY UPDATE 
                 source_url = VALUES(source_url),
                 published_at = NOW()
             """
-            cursor.execute(query, (news_id, title_hash, content_hash, url))
+            cursor.execute(query_published_news, (news_id, title_hash, content_hash, url))
+            
+            # 2. Вставка или обновление оригинальных данных новости
+            query_published_news_data = """
+            INSERT INTO published_news_data 
+            (news_id, original_title, original_content, original_language, category, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, NOW(), NOW())
+            ON DUPLICATE KEY UPDATE
+                original_title = VALUES(original_title),
+                original_content = VALUES(original_content),
+                original_language = VALUES(original_language),
+                category = VALUES(category),
+                updated_at = NOW()
+            """
+            cursor.execute(query_published_news_data, (
+                news_id, 
+                title, 
+                content, 
+                original_language, 
+                category
+            ))
+
+            # 3. Вставка или обновление переводов
+            # Убедимся, что перевод на оригинальный язык тоже сохранен (если не передан)
+            # (Логика уже внутри prepare_translations, но на всякий случай проверим)
+            # if original_language not in translations_dict:
+            #      translations_dict[original_language] = {'title': title, 'description': content, 'category': category}
+
+            for lang_code, trans_data in translations_dict.items():
+                # Проверка на поддерживаемые языки и наличие данных
+                if lang_code in ['ru', 'en', 'de', 'fr'] and isinstance(trans_data, dict):
+                    trans_title = trans_data.get('title', title) # fallback на оригинал
+                    trans_content = trans_data.get('description', content) # fallback на оригинал
+                    # trans_category = trans_data.get('category', category) # Если нужно сохранять и её
+                    
+                    query_translation = """
+                    INSERT INTO news_translations (news_id, language, translated_title, translated_content, created_at, updated_at)
+                    VALUES (%s, %s, %s, %s, NOW(), NOW())
+                    ON DUPLICATE KEY UPDATE
+                        translated_title = VALUES(translated_title),
+                        translated_content = VALUES(translated_content),
+                        updated_at = NOW()
+                    """
+                    cursor.execute(query_translation, (news_id, lang_code, trans_title, trans_content))
+            
             connection.commit()
+            print(f"[DB] Новость и переводы сохранены: {news_id}")
             return True
             
         except Exception as e:
-            print(f"Ошибка сохранения публикации: {e}")
+            print(f"[ERROR] Ошибка сохранения публикации и данных для API: {e}")
             connection.rollback()
             return False
         finally:
-            cursor.close()
+            if cursor:
+                cursor.close()
     
     async def fetch_news(self):
         """Асинхронная функция для получения новостей из RSS-лент"""
@@ -367,35 +425,6 @@ class RSSManager:
         
         sorted_news = sorted(all_news, key=lambda x: x['published'], reverse=True)
         return sorted_news[:MAX_TOTAL_NEWS]
-    
-    async def monitor_news_task(self, context):
-        """Асинхронная задача мониторинга новостей"""
-        print("[LOG] Запуск задачи мониторинга новостей")
-
-        try:
-            news_list = await asyncio.wait_for(self.fetch_news(), timeout=120)
-            print(f"[LOG] Получено {len(news_list)} новостей")
-            
-            # Импортируем необходимые функции
-            from bot import post_to_channel, send_personal_news
-            
-            for i, news in enumerate(news_list[:20]):
-                try:
-                    asyncio.create_task(post_to_channel(context.bot, news))
-                    asyncio.create_task(send_personal_news(context.bot, news))
-                    self.mark_as_published(news['title'], news['description'], news['link'])
-                    
-                    if i % 5 == 0:
-                        await asyncio.sleep(5)
-                        
-                except Exception as e:
-                    print(f"[ERROR] Ошибка обработки новости: {e}")
-                    continue
-                            
-        except asyncio.TimeoutError:
-            print("[ERROR] Таймаут получения новостей")
-        except Exception as e:
-            print(f"[ERROR] Ошибка в задаче мониторинга: {e}")
     
     def close_connection(self):
         """Закрыть соединение с базой данных"""
