@@ -323,7 +323,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             print(f"[LOG] Создание нового состояния для пользователя {user_id}")
             USER_STATES[user_id] = {
                 "current_subs": user_manager.get_user_subscriptions(user_id) or [],
-                "language": user_manager.get_current_user_language(user_id)
+                "language": get_current_user_language(user_id)
             }
             print(f"[LOG] Новое состояние для {user_id}: {USER_STATES[user_id]}")
             
