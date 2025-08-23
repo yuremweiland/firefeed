@@ -45,7 +45,9 @@ app = FastAPI(
     title="News API for Chrome Extension",
     description="API для получения новостей из RSS-лент, обработанных Telegram-ботом.",
     version="1.0.0",
-    # openapi_url, docs_url, redoc_url оставлены по умолчанию или настроены как нужно
+    openapi_url="/api/openapi.json", # Путь к OpenAPI схеме
+    docs_url="/api/docs", # Путь к интерактивной документации Swagger UI
+    redoc_url="/api/redoc", # Путь к документации ReDoc
 )
 
 app.add_middleware(ForceUTF8ResponseMiddleware)
@@ -265,49 +267,34 @@ async def get_news_by_id(news_id: str):
             cursor.close()
 
 
-# --- ОБНОВЛЕНИЕ ЭНДПОИНТА КАТЕГОРИЙ ---
 @app.get("/api/categories/", response_model=List[models.CategoryItem], summary="Получить категории")
 async def get_categories():
     """
     Получить список всех уникальных категорий.
-    Теперь получает имена из таблицы `categories`.
+    Данные в формате id, name из таблицы `categories`.
     """
     with database.get_db() as connection:
         if connection is None:
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Ошибка подключения к базе данных")
 
-        cursor = connection.cursor(dictionary=True)
+        cursor = connection.cursor(dictionary=True) # Убедитесь, что dictionary=True
         try:
-            # --- ОБНОВЛЕНИЕ ЗАПРОСА ---
-            # Получаем имена категорий из справочной таблицы
-            # Можно добавить ORDER BY для сортировки
-            query = "SELECT DISTINCT name FROM categories ORDER BY name"
-            # Если нужно только категории, которые используются в rss_feeds:
-            # query = "SELECT DISTINCT c.name FROM categories c JOIN rss_feeds rf ON c.id = rf.category_id ORDER BY c.name"
-            # --- КОНЕЦ ОБНОВЛЕНИЯ ---
+            query = "SELECT id, name FROM categories ORDER BY name"
             cursor.execute(query)
             results = cursor.fetchall()
             
-            # --- ОБНОВЛЕНИЕ ФОРМИРОВАНИЯ ОТВЕТА ---
-            # Создаем модель CategoryItem с полем 'name', соответствующим 'name' из БД
-            # (Предполагается, что models.CategoryItem определен как class CategoryItem(BaseModel): name: str)
-            return [models.CategoryItem(name=row['name']) for row in results]
-            # --- КОНЕЦ ОБНОВЛЕНИЯ ---
+            return [models.CategoryItem(id=row['id'], name=row['name']) for row in results]
         except Exception as e:
             print(f"[API] Ошибка при получении категорий в get_categories: {e}")
-            # traceback.print_exc()
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Внутренняя ошибка сервера")
         finally:
             cursor.close()
-# --- КОНЕЦ ОБНОВЛЕНИЯ ---
 
 
-# --- ОБНОВЛЕНИЕ ЭНДПОИНТА ЯЗЫКОВ (Опционально) ---
 @app.get("/api/languages/", response_model=List[models.LanguageItem], summary="Получить оригинальные языки")
 async def get_original_languages():
     """
-    Получить список всех оригинальных языков новостей.
-    Можно обновить, чтобы получать языки из rss_feeds.
+    Получить список всех языков активных фидов
     """
     with database.get_db() as connection:
         if connection is None:
@@ -315,32 +302,20 @@ async def get_original_languages():
 
         cursor = connection.cursor(dictionary=True)
         try:
-            # --- ВОЗМОЖНОЕ ОБНОВЛЕНИЕ ЗАПРОСА ---
-            # Получаем уникальные языки из таблицы rss_feeds
-            # Это даст языки активных фидов, а не только тех, что есть в published_news_data
-            # query = "SELECT DISTINCT language FROM rss_feeds WHERE is_active = 1 ORDER BY language"
-            
-            # ИЛИ оставить как есть, если хотите языки существующих новостей
-            query = "SELECT DISTINCT original_language FROM published_news_data WHERE original_language IS NOT NULL ORDER BY original_language"
-            # --- КОНЕЦ ВОЗМОЖНОГО ОБНОВЛЕНИЯ ---
+            query = "SELECT DISTINCT language FROM rss_feeds WHERE is_active = 1 ORDER BY language"
             cursor.execute(query)
             results = cursor.fetchall()
             
-            # --- ОБНОВЛЕНИЕ ФОРМИРОВАНИЯ ОТВЕТА ---
-            # Предполагается, что models.LanguageItem(language: str)
-            return [models.LanguageItem(language=row['original_language']) for row in results]
-            # --- КОНЕЦ ОБНОВЛЕНИЯ ---
+            return [models.LanguageItem(language=row['language']) for row in results]
         except Exception as e:
             print(f"[API] Ошибка при получении языков в get_original_languages: {e}")
             # traceback.print_exc()
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Внутренняя ошибка сервера")
         finally:
             cursor.close()
-# --- КОНЕЦ ОБНОВЛЕНИЯ ---
 
 
-# --- Healthcheck endpoint (опционально, но полезно) ---
-# (Без изменений)
+# --- Healthcheck endpoint ---
 @app.get("/api/health", summary="Проверка состояния API")
 async def health_check():
     """Проверяет, запущено ли API и доступна ли БД."""

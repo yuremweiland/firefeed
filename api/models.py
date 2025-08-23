@@ -16,9 +16,7 @@ class NewsItem(BaseModel):
     original_content: str
     original_language: str
     category: Optional[str] = None
-    # --- ДОБАВЛЕНО ---
     source: Optional[str] = None # Имя источника новости
-    # -----------------
     title_ru: Optional[str] = None
     content_ru: Optional[str] = None
     title_en: Optional[str] = None
@@ -33,13 +31,9 @@ class NewsItem(BaseModel):
     class Config:
         from_attributes = True # Для совместимости с ORM (если будете использовать)
 
-# Модели для списков
-
-# --- ИЗМЕНЕНО ---
-# Поле 'category' заменено на 'name' для соответствия данным из таблицы 'categories'
 class CategoryItem(BaseModel):
-    name: str # Имя категории из таблицы categories
-# ----------------
+    id: int
+    name: str
 
 class LanguageItem(BaseModel):
     language: str
