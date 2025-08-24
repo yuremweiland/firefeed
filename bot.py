@@ -5,7 +5,7 @@ import asyncio
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.error import NetworkError, BadRequest, TelegramError
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
-from config import WEBHOOK_CONFIG, BOT_TOKEN, FIRE_EMOJI, CHANNEL_IDS
+from config import WEBHOOK_CONFIG, BOT_TOKEN, FIRE_EMOJI, CHANNEL_IDS, CHANNEL_CATEGORIES
 from user_manager import UserManager
 from translator import translate_text, prepare_translations
 from functools import lru_cache
@@ -917,7 +917,13 @@ async def process_news_item(context, rss_manager, news):
 
     if success_db:
         print("[MAIN] Данные новости успешно обработаны и сохранены в БД.")
-        asyncio.create_task(post_to_channel(context.bot, news, translations))
+        if news['category'] in CHANNEL_CATEGORIES:
+            print(f"[LOG] Новость категории '{news['category']}' подходит для общего канала. Планируем публикацию.")
+            asyncio.create_task(post_to_channel(context.bot, news, translations))
+        else:
+            print(f"[LOG] Новость категории '{news['category']}' НЕ подходит для общего канала. Публикация в канал пропущена.")
+
+        # Персональные новости отправляются всегда, так как пользователи могут быть подписаны на любую категорию
         asyncio.create_task(send_personal_news(context.bot, news, translations))
     else:
         print("[MAIN] Ошибка обработки и сохранения данных в БД. Публикация в Telegram пропущена.")
