@@ -81,7 +81,7 @@ async def get_news(
         if connection is None:
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Ошибка подключения к базе данных")
 
-        cursor = connection.cursor(dictionary=True)
+        cursor = connection.cursor()
         try:
             # JOIN с rss_feeds, categories и sources для получения имен категории и источника
             query = """
@@ -144,31 +144,37 @@ async def get_news(
             cursor.execute(query, full_params)
             results = cursor.fetchall()
 
+            # Получаем имена колонок для создания словарей
+            columns = [desc[0] for desc in cursor.description]
+
             news_list = []
             for row in results:
-                 # Используем category_name и source_name из результата запроса
-                 item_data = {
-                     "news_id": row['news_id'],
-                     "original_title": row['original_title'],
-                     "original_content": row['original_content'],
-                     "original_language": row['original_language'],
-                     "image_filename": row['image_filename'],
-                     "category": row['category_name'], # Используем имя категории
-                     "source": row['source_name'],     # Добавляем имя источника (если нужно в модели)
-                     "source_url": row['source_url'],
-                     "published_at": format_datetime(row['published_at']),
-                     f"title_{display_language}": row['display_title'],
-                     f"content_{display_language}": row['display_content'],
-                     "title_ru": row['title_ru'],
-                     "content_ru": row['content_ru'],
-                     "title_en": row['title_en'],
-                     "content_en": row['content_en'],
-                     "title_de": row['title_de'],
-                     "content_de": row['content_de'],
-                     "title_fr": row['title_fr'],
-                     "content_fr": row['content_fr'],
-                 }
-                 news_list.append(models.NewsItem(**item_data))
+                # Создаем словарь из результата
+                row_dict = dict(zip(columns, row))
+                
+                # Используем category_name и source_name из результата запроса
+                item_data = {
+                    "news_id": row_dict['news_id'],
+                    "original_title": row_dict['original_title'],
+                    "original_content": row_dict['original_content'],
+                    "original_language": row_dict['original_language'],
+                    "image_filename": row_dict['image_filename'],
+                    "category": row_dict['category_name'], # Используем имя категории
+                    "source": row_dict['source_name'],     # Добавляем имя источника (если нужно в модели)
+                    "source_url": row_dict['source_url'],
+                    "published_at": format_datetime(row_dict['published_at']),
+                    f"title_{display_language}": row_dict['display_title'],
+                    f"content_{display_language}": row_dict['display_content'],
+                    "title_ru": row_dict['title_ru'],
+                    "content_ru": row_dict['content_ru'],
+                    "title_en": row_dict['title_en'],
+                    "content_en": row_dict['content_en'],
+                    "title_de": row_dict['title_de'],
+                    "content_de": row_dict['content_de'],
+                    "title_fr": row_dict['title_fr'],
+                    "content_fr": row_dict['content_fr'],
+                }
+                news_list.append(models.NewsItem(**item_data))
                  
             return news_list
 
@@ -187,7 +193,7 @@ async def get_news_by_id(news_id: str):
         if connection is None:
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Ошибка подключения к базе данных")
 
-        cursor = connection.cursor(dictionary=True)
+        cursor = connection.cursor()
         try:
             # Аналогично, добавляем JOIN с rss_feeds, categories, sources
             query = """
@@ -222,27 +228,31 @@ async def get_news_by_id(news_id: str):
             if result is None:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Новость не найдена")
 
+            # Получаем имена колонок для создания словаря
+            columns = [desc[0] for desc in cursor.description]
+            result_dict = dict(zip(columns, result))
+
             item_data = {
-                "news_id": result['news_id'],
-                "original_title": result['original_title'],
-                "original_content": result['original_content'],
-                "original_language": result['original_language'],
-                "image_filename": result['image_filename'],
-                "category": result['category_name'], # Используем имя категории
-                "source": result['source_name'],     # Добавляем имя источника
-                "source_url": result['source_url'],
-                "published_at": format_datetime(result['published_at']),
-                "title_ru": result['title_ru'],
-                "content_ru": result['content_ru'],
-                "title_en": result['title_en'],
-                "content_en": result['content_en'],
-                "title_de": result['title_de'],
-                "content_de": result['content_de'],
-                "title_fr": result['title_fr'],
-                "content_fr": result['content_fr'],
+                "news_id": result_dict['news_id'],
+                "original_title": result_dict['original_title'],
+                "original_content": result_dict['original_content'],
+                "original_language": result_dict['original_language'],
+                "image_filename": result_dict['image_filename'],
+                "category": result_dict['category_name'], # Используем имя категории
+                "source": result_dict['source_name'],     # Добавляем имя источника
+                "source_url": result_dict['source_url'],
+                "published_at": format_datetime(result_dict['published_at']),
+                "title_ru": result_dict['title_ru'],
+                "content_ru": result_dict['content_ru'],
+                "title_en": result_dict['title_en'],
+                "content_en": result_dict['content_en'],
+                "title_de": result_dict['title_de'],
+                "content_de": result_dict['content_de'],
+                "title_fr": result_dict['title_fr'],
+                "content_fr": result_dict['content_fr'],
                 # Fallback для display_ полей (можно уточнить логику)
-                "title_en": result['title_en'] or result['original_title'],
-                "content_en": result['content_en'] or result['original_content'],
+                "title_en": result_dict['title_en'] or result_dict['original_title'],
+                "content_en": result_dict['content_en'] or result_dict['original_content'],
             }
 
             return models.NewsItem(**item_data)
@@ -267,13 +277,16 @@ async def get_categories():
         if connection is None:
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Ошибка подключения к базе данных")
 
-        cursor = connection.cursor(dictionary=True) # Убедитесь, что dictionary=True
+        cursor = connection.cursor()
         try:
             query = "SELECT id, name FROM categories ORDER BY name"
             cursor.execute(query)
             results = cursor.fetchall()
             
-            return [models.CategoryItem(id=row['id'], name=row['name']) for row in results]
+            # Получаем имена колонок для создания словарей
+            columns = [desc[0] for desc in cursor.description]
+            
+            return [models.CategoryItem(id=row[0], name=row[1]) for row in results]
         except Exception as e:
             print(f"[API] Ошибка при получении категорий в get_categories: {e}")
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Внутренняя ошибка сервера")
@@ -290,13 +303,13 @@ async def get_original_languages():
         if connection is None:
             raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Ошибка подключения к базе данных")
 
-        cursor = connection.cursor(dictionary=True)
+        cursor = connection.cursor()
         try:
-            query = "SELECT DISTINCT language FROM rss_feeds WHERE is_active = 1 ORDER BY language"
+            query = "SELECT DISTINCT language FROM rss_feeds WHERE is_active = TRUE ORDER BY language"
             cursor.execute(query)
             results = cursor.fetchall()
             
-            return [models.LanguageItem(language=row['language']) for row in results]
+            return [models.LanguageItem(language=row[0]) for row in results]
         except Exception as e:
             print(f"[API] Ошибка при получении языков в get_original_languages: {e}")
             # traceback.print_exc()
@@ -311,7 +324,7 @@ async def health_check():
     """Проверяет, запущено ли API и доступна ли БД."""
     try:
         with database.get_db() as connection:
-            if connection and connection.is_connected():
+            if connection:
                 db_status = "ok"
             else:
                 db_status = "error"

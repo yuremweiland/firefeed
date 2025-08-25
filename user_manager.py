@@ -1,5 +1,5 @@
-import mysql.connector
-from mysql.connector import Error
+import psycopg2
+from psycopg2 import Error
 import asyncio
 import json
 import time
@@ -20,7 +20,7 @@ class UserManager:
         connection = None
         cursor = None
         try:
-            connection = mysql.connector.connect(**DB_CONFIG)
+            connection = psycopg2.connect(**DB_CONFIG)
             cursor = connection.cursor()
             cursor.execute("SELECT subscriptions, language FROM user_preferences WHERE user_id = %s", (user_id,))
             result = cursor.fetchone()
@@ -40,7 +40,7 @@ class UserManager:
         finally:
             if cursor:
                 cursor.close()
-            if connection and connection.is_connected():
+            if connection:
                 connection.close()
 
     def _save_user_settings(self, user_id, subscriptions, language):
@@ -48,14 +48,14 @@ class UserManager:
         connection = None
         cursor = None
         try:
-            connection = mysql.connector.connect(**DB_CONFIG)
+            connection = psycopg2.connect(**DB_CONFIG)
             cursor = connection.cursor()
             cursor.execute('''
                 INSERT INTO user_preferences (user_id, subscriptions, language)
                 VALUES (%s, %s, %s)
-                ON DUPLICATE KEY UPDATE
-                    subscriptions = VALUES(subscriptions),
-                    language = VALUES(language)
+                ON CONFLICT (user_id) DO UPDATE SET
+                    subscriptions = EXCLUDED.subscriptions,
+                    language = EXCLUDED.language
             ''', (user_id, json.dumps(subscriptions), language))
             
             connection.commit()
@@ -68,7 +68,7 @@ class UserManager:
         finally:
             if cursor:
                 cursor.close()
-            if connection and connection.is_connected():
+            if connection:
                 connection.close()
 
     def _set_user_language(self, user_id, lang_code):
@@ -76,12 +76,12 @@ class UserManager:
         connection = None
         cursor = None
         try:
-            connection = mysql.connector.connect(**DB_CONFIG)
+            connection = psycopg2.connect(**DB_CONFIG)
             cursor = connection.cursor()
             cursor.execute('''
                 INSERT INTO user_preferences (user_id, language)
                 VALUES (%s, %s)
-                ON DUPLICATE KEY UPDATE language = VALUES(language)
+                ON CONFLICT (user_id) DO UPDATE SET language = EXCLUDED.language
             ''', (user_id, lang_code))
             
             connection.commit()
@@ -94,7 +94,7 @@ class UserManager:
         finally:
             if cursor:
                 cursor.close()
-            if connection and connection.is_connected():
+            if connection:
                 connection.close()
 
     def _get_subscribers_for_category(self, category):
@@ -102,7 +102,7 @@ class UserManager:
         connection = None
         cursor = None
         try:
-            connection = mysql.connector.connect(**DB_CONFIG)
+            connection = psycopg2.connect(**DB_CONFIG)
             cursor = connection.cursor()
             cursor.execute('''
                 SELECT user_id, subscriptions, language 
@@ -134,7 +134,7 @@ class UserManager:
         finally:
             if cursor:
                 cursor.close()
-            if connection and connection.is_connected():
+            if connection:
                 connection.close()
 
     def _get_all_users(self):
@@ -142,7 +142,7 @@ class UserManager:
         connection = None
         cursor = None
         try:
-            connection = mysql.connector.connect(**DB_CONFIG)
+            connection = psycopg2.connect(**DB_CONFIG)
             cursor = connection.cursor()
             cursor.execute("SELECT user_id FROM user_preferences")
             user_ids = [row[0] for row in cursor.fetchall()]
@@ -153,7 +153,7 @@ class UserManager:
         finally:
             if cursor:
                 cursor.close()
-            if connection and connection.is_connected():
+            if connection:
                 connection.close()
 
     # --- Публичные асинхронные методы ---
@@ -198,9 +198,3 @@ class UserManager:
         """Асинхронно получаем список всех пользователей"""
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, self._get_all_users)
-
-    # Метод get_db_connection больше не нужен для асинхронных вызовов
-    # Метод close_connection больше не нужен, так как соединения закрываются внутри каждого метода
-    def close_connection(self):
-        """Закрыть соединение с базой данных (устарело для новых асинхронных методов)"""
-        print("[UserManager] Метод close_connection устарел. Соединения закрываются автоматически.")

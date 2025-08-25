@@ -64,8 +64,8 @@ WantedBy=multi-user.target
 [Unit]
 Description=Firefeed News API (FastAPI)
 After=network.target
-After=mysql.service
-Wants=mysql.service
+After=postgresql@17-main.service
+Wants=postgresql@17-main.service
 
 [Service]
 Type=simple

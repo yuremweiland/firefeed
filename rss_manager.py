@@ -1,5 +1,5 @@
-import mysql.connector
-from mysql.connector import Error
+import psycopg2
+from psycopg2 import Error
 import hashlib
 import feedparser
 import asyncio
@@ -20,8 +20,8 @@ class RSSManager:
         cursor = None
         feeds = []
         try:
-            connection = mysql.connector.connect(**DB_CONFIG)
-            cursor = connection.cursor(dictionary=True)
+            connection = psycopg2.connect(**DB_CONFIG)
+            cursor = connection.cursor()
             
             query = """
                 SELECT 
@@ -42,22 +42,22 @@ class RSSManager:
             
             for row in results:
                 feeds.append({
-                    'id': row['feed_id'],
-                    'url': row['feed_url'].strip(),
-                    'name': row['feed_name'],
-                    'lang': row['feed_lang'],
-                    'source': row['source_name'],
-                    'source_id': row['source_id'],
-                    'category': row['category_name'] if row['category_name'] else 'uncategorized',
-                    'category_display': row['category_display_name']
+                    'id': row[0],
+                    'url': row[1].strip(),
+                    'name': row[2],
+                    'lang': row[3],
+                    'source': row[4],
+                    'source_id': row[5],
+                    'category': row[6] if row[6] else 'uncategorized',
+                    'category_display': row[7]
                 })
             
-        except mysql.connector.Error as err:
+        except psycopg2.Error as err:
             print(f"[DB] [RSSManager] Ошибка в _get_all_feeds: {err}")
         finally:
             if cursor:
                 cursor.close()
-            if connection and connection.is_connected():
+            if connection:
                 connection.close()
         return feeds
 
@@ -67,8 +67,8 @@ class RSSManager:
         cursor = None
         feeds = []
         try:
-            connection = mysql.connector.connect(**DB_CONFIG)
-            cursor = connection.cursor(dictionary=True)
+            connection = psycopg2.connect(**DB_CONFIG)
+            cursor = connection.cursor()
             
             query = """
                 SELECT 
@@ -83,29 +83,29 @@ class RSSManager:
                 FROM rss_feeds f
                 JOIN sources s ON f.source_id = s.id
                 LEFT JOIN categories c ON f.category_id = c.id
-                WHERE f.is_active = 1
+                WHERE f.is_active = TRUE
             """
             cursor.execute(query)
             results = cursor.fetchall()
             
             for row in results:
                 feeds.append({
-                    'id': row['feed_id'],
-                    'url': row['feed_url'].strip(),
-                    'name': row['feed_name'],
-                    'lang': row['feed_lang'],
-                    'source': row['source_name'],
-                    'source_id': row['source_id'],
-                    'category': row['category_name'] if row['category_name'] else 'uncategorized',
-                    'category_display': row['category_display_name']
+                    'id': row[0],
+                    'url': row[1].strip(),
+                    'name': row[2],
+                    'lang': row[3],
+                    'source': row[4],
+                    'source_id': row[5],
+                    'category': row[6] if row[6] else 'uncategorized',
+                    'category_display': row[7]
                 })
             
-        except mysql.connector.Error as err:
+        except psycopg2.Error as err:
             print(f"[DB] [RSSManager] Ошибка в _get_all_active_feeds: {err}")
         finally:
             if cursor:
                 cursor.close()
-            if connection and connection.is_connected():
+            if connection:
                 connection.close()
         return feeds
 
@@ -115,8 +115,8 @@ class RSSManager:
         cursor = None
         feeds = []
         try:
-            connection = mysql.connector.connect(**DB_CONFIG)
-            cursor = connection.cursor(dictionary=True)
+            connection = psycopg2.connect(**DB_CONFIG)
+            cursor = connection.cursor()
             
             query = """
                 SELECT rf.*, c.name as category_name, s.name as source_name
@@ -126,14 +126,16 @@ class RSSManager:
                 WHERE c.name = %s AND rf.is_active = TRUE
             """
             cursor.execute(query, (category_name,))
-            feeds = cursor.fetchall() # Возвращаем сырые данные из fetchall()
+            columns = [desc[0] for desc in cursor.description]
+            results = cursor.fetchall()
+            feeds = [dict(zip(columns, row)) for row in results]
             
-        except mysql.connector.Error as e:
+        except psycopg2.Error as e:
             print(f"[DB] [RSSManager] Ошибка при получении фидов по категории '{category_name}': {e}")
         finally:
             if cursor:
                 cursor.close()
-            if connection and connection.is_connected():
+            if connection:
                 connection.close()
         return feeds
 
@@ -143,8 +145,8 @@ class RSSManager:
         cursor = None
         feeds = []
         try:
-            connection = mysql.connector.connect(**DB_CONFIG)
-            cursor = connection.cursor(dictionary=True)
+            connection = psycopg2.connect(**DB_CONFIG)
+            cursor = connection.cursor()
             
             query = """
                 SELECT rf.*, c.name as category_name, s.name as source_name 
@@ -154,14 +156,16 @@ class RSSManager:
                 WHERE rf.language = %s AND rf.is_active = TRUE
             """
             cursor.execute(query, (lang,))
-            feeds = cursor.fetchall() # Возвращаем сырые данные из fetchall()
+            columns = [desc[0] for desc in cursor.description]
+            results = cursor.fetchall()
+            feeds = [dict(zip(columns, row)) for row in results]
             
-        except mysql.connector.Error as e:
+        except psycopg2.Error as e:
             print(f"[DB] [RSSManager] Ошибка при получении фидов по языку '{lang}': {e}")
         finally:
             if cursor:
                 cursor.close()
-            if connection and connection.is_connected():
+            if connection:
                 connection.close()
         return feeds
 
@@ -171,8 +175,8 @@ class RSSManager:
         cursor = None
         feeds = []
         try:
-            connection = mysql.connector.connect(**DB_CONFIG)
-            cursor = connection.cursor(dictionary=True)
+            connection = psycopg2.connect(**DB_CONFIG)
+            cursor = connection.cursor()
             
             query = """
                 SELECT rf.*, c.name as category_name, s.name as source_name
@@ -182,14 +186,16 @@ class RSSManager:
                 WHERE s.name = %s AND rf.is_active = TRUE
             """
             cursor.execute(query, (source_name,))
-            feeds = cursor.fetchall() # Возвращаем сырые данные из fetchall()
+            columns = [desc[0] for desc in cursor.description]
+            results = cursor.fetchall()
+            feeds = [dict(zip(columns, row)) for row in results]
             
-        except mysql.connector.Error as e:
+        except psycopg2.Error as e:
             print(f"[DB] [RSSManager] Ошибка при получении фидов по источнику '{source_name}': {e}")
         finally:
             if cursor:
                 cursor.close()
-            if connection and connection.is_connected():
+            if connection:
                 connection.close()
         return feeds
 
@@ -198,7 +204,7 @@ class RSSManager:
         connection = None
         cursor = None
         try:
-            connection = mysql.connector.connect(**DB_CONFIG)
+            connection = psycopg2.connect(**DB_CONFIG)
             cursor = connection.cursor()
             
             # 1. Получить ID категории по имени
@@ -228,7 +234,7 @@ class RSSManager:
             print(f"[DB] [RSSManager] Лента '{url}' успешно добавлена.")
             return True
             
-        except mysql.connector.Error as e:
+        except psycopg2.Error as e:
             print(f"[DB] [RSSManager] Ошибка БД при добавлении фида '{url}': {e}")
             if connection:
                 connection.rollback()
@@ -236,7 +242,7 @@ class RSSManager:
         finally:
             if cursor:
                 cursor.close()
-            if connection and connection.is_connected():
+            if connection:
                 connection.close()
 
     def _update_feed(self, feed_id, category_name, url, language, source_name, is_active, feed_name):
@@ -244,7 +250,7 @@ class RSSManager:
         connection = None
         cursor = None
         try:
-            connection = mysql.connector.connect(**DB_CONFIG)
+            connection = psycopg2.connect(**DB_CONFIG)
             cursor = connection.cursor()
             
             updates = []
@@ -292,14 +298,15 @@ class RSSManager:
             query = f"UPDATE rss_feeds SET {', '.join(updates)} WHERE id = %s"
             cursor.execute(query, values)
             connection.commit()
-            affected_rows = cursor.rowcount
+            cursor.execute("SELECT COUNT(*) FROM rss_feeds WHERE id = %s", (feed_id,))
+            affected_rows = cursor.fetchone()[0]
             if affected_rows > 0:
                 print(f"[DB] [RSSManager] Лента с ID {feed_id} успешно обновлена.")
             else:
                 print(f"[DB] [RSSManager] Лента с ID {feed_id} не найдена или не была изменена.")
             return affected_rows > 0
             
-        except mysql.connector.Error as e:
+        except psycopg2.Error as e:
             print(f"[DB] [RSSManager] Ошибка БД при обновлении фида с ID {feed_id}: {e}")
             if connection:
                 connection.rollback()
@@ -307,7 +314,7 @@ class RSSManager:
         finally:
             if cursor:
                 cursor.close()
-            if connection and connection.is_connected():
+            if connection:
                 connection.close()
 
     def _delete_feed(self, feed_id):
@@ -315,7 +322,7 @@ class RSSManager:
         connection = None
         cursor = None
         try:
-            connection = mysql.connector.connect(**DB_CONFIG)
+            connection = psycopg2.connect(**DB_CONFIG)
             cursor = connection.cursor()
             
             query = "DELETE FROM rss_feeds WHERE id = %s"
@@ -328,7 +335,7 @@ class RSSManager:
                 print(f"[DB] [RSSManager] Лента с ID {feed_id} не найдена.")
             return affected_rows > 0
             
-        except mysql.connector.Error as e:
+        except psycopg2.Error as e:
             print(f"[DB] [RSSManager] Ошибка БД при удалении фида с ID {feed_id}: {e}")
             if connection:
                 connection.rollback()
@@ -336,7 +343,7 @@ class RSSManager:
         finally:
             if cursor:
                 cursor.close()
-            if connection and connection.is_connected():
+            if connection:
                 connection.close()
 
     def _get_categories(self):
@@ -345,7 +352,7 @@ class RSSManager:
         cursor = None
         categories = []
         try:
-            connection = mysql.connector.connect(**DB_CONFIG)
+            connection = psycopg2.connect(**DB_CONFIG)
             cursor = connection.cursor()
             
             get_categories_query = """
@@ -358,12 +365,12 @@ class RSSManager:
             cursor.execute(get_categories_query)
             categories = [row[0] for row in cursor.fetchall()]
             
-        except mysql.connector.Error as e:
+        except psycopg2.Error as e:
             print(f"[DB] [RSSManager] Ошибка при получении категорий: {e}")
         finally:
             if cursor:
                 cursor.close()
-            if connection and connection.is_connected():
+            if connection:
                 connection.close()
         return categories
 
@@ -427,7 +434,7 @@ class RSSManager:
         cursor = None
         try:
             # 1. Создаем новое соединение внутри метода
-            connection = mysql.connector.connect(**DB_CONFIG)
+            connection = psycopg2.connect(**DB_CONFIG)
             cursor = connection.cursor()
 
             # 2. Проверяем существование по title_hash ИЛИ content_hash
@@ -444,7 +451,7 @@ class RSSManager:
 
             return not is_duplicate # Возвращаем True, если НЕ дубликат
             
-        except mysql.connector.Error as err:
+        except psycopg2.Error as err:
             print(f"[DB] [is_news_new] Ошибка БД: {err}")
             # В случае ошибки БД лучше считать новость НЕ новой, чтобы избежать дубликатов
             return False 
@@ -455,7 +462,7 @@ class RSSManager:
             # 3. ВАЖНО: Закрываем курсор и соединение
             if cursor:
                 cursor.close()
-            if connection and connection.is_connected():
+            if connection:
                 connection.close()
                 # print("[DB] [is_news_new] Соединение закрыто") # Опционально
 
@@ -480,7 +487,7 @@ class RSSManager:
         cursor = None
         try:
             # Создаем новое соединение внутри метода
-            connection = mysql.connector.connect(**DB_CONFIG) # <-- Используем DB_CONFIG напрямую
+            connection = psycopg2.connect(**DB_CONFIG) # <-- Используем DB_CONFIG напрямую
             cursor = connection.cursor()
             # --- Конец создания соединения ---
 
@@ -499,8 +506,8 @@ class RSSManager:
             query_published_news = """
             INSERT INTO published_news (id, title_hash, content_hash, source_url, published_at)
             VALUES (%s, %s, %s, %s, NOW())
-            ON DUPLICATE KEY UPDATE 
-                source_url = VALUES(source_url),
+            ON CONFLICT (id) DO UPDATE SET 
+                source_url = EXCLUDED.source_url,
                 published_at = NOW()
             """
             params_news = (news_id, title_hash, content_hash, url)
@@ -549,12 +556,12 @@ class RSSManager:
             INSERT INTO published_news_data 
             (news_id, original_title, original_content, original_language, category_id, image_filename, created_at, updated_at)
             VALUES (%s, %s, %s, %s, %s, %s, NOW(), NOW())
-            ON DUPLICATE KEY UPDATE
-                original_title = VALUES(original_title),
-                original_content = VALUES(original_content),
-                original_language = VALUES(original_language),
-                category_id = VALUES(category_id),
-                image_filename = VALUES(image_filename),
+            ON CONFLICT (news_id) DO UPDATE SET
+                original_title = EXCLUDED.original_title,
+                original_content = EXCLUDED.original_content,
+                original_language = EXCLUDED.original_language,
+                category_id = EXCLUDED.category_id,
+                image_filename = EXCLUDED.image_filename,
                 updated_at = NOW()
             """
             print(f"[DB] [mark_as_published] Подготовка запроса к 'published_news_data' (ID: {short_id})")
@@ -577,9 +584,9 @@ class RSSManager:
                     query_translation = """
                     INSERT INTO news_translations (news_id, language, translated_title, translated_content, created_at, updated_at)
                     VALUES (%s, %s, %s, %s, NOW(), NOW())
-                    ON DUPLICATE KEY UPDATE
-                        translated_title = VALUES(translated_title),
-                        translated_content = VALUES(translated_content),
+                    ON CONFLICT (news_id, language) DO UPDATE SET
+                        translated_title = EXCLUDED.translated_title,
+                        translated_content = EXCLUDED.translated_content,
                         updated_at = NOW()
                     """
                     cursor.execute(query_translation, (news_id, lang_code, trans_title, trans_content))
@@ -590,7 +597,7 @@ class RSSManager:
             
             return True # <-- Возвращаем True при успехе
             
-        except mysql.connector.Error as err:
+        except psycopg2.Error as err:
             print(f"[DB] [ERROR] Ошибка БД при сохранении (ID: {short_id}): {err}")
             if connection:
                 connection.rollback()
@@ -606,7 +613,7 @@ class RSSManager:
             # --- ВАЖНО: Закрываем курсор и соединение ---
             if cursor:
                 cursor.close()
-            if connection and connection.is_connected():
+            if connection:
                 connection.close()
                 print(f"[DB] [mark_as_published] Соединение закрыто. (ID: {short_id})")
             # --- Конец закрытия соединения ---
