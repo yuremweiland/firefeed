@@ -8,6 +8,7 @@ from bs4 import BeautifulSoup
 from urllib.parse import urlparse, urljoin
 from functools import partial
 
+
 def clean_html(raw_html):
     """Удаляет все HTML-теги и преобразует HTML-сущности"""
     if not raw_html:

@@ -374,6 +374,133 @@ class RSSManager:
                 connection.close()
         return categories
 
+    def _get_feed_cooldown_minutes(self, rss_feed_id):
+        """Вспомогательный метод: Получить время кулдауна в минутах для конкретной RSS-ленты"""
+        connection = None
+        cursor = None
+        minutes = 20
+        try:
+            connection = psycopg2.connect(**DB_CONFIG)
+            cursor = connection.cursor()
+
+            query = """
+                SELECT cooldown_minutes 
+                FROM rss_feeds 
+                WHERE id = %s AND is_active = true
+            """
+
+            cursor.execute(query, (rss_feed_id,))
+            row = cursor.fetchone()
+            minutes = row[0] if row else 20
+
+        except psycopg2.Error as e:
+            print(f"[DB] [RSSManager] Ошибка при получении времени кулдауна: {e}")
+            return minutes
+        finally:
+            if cursor:
+                cursor.close()
+            if connection:
+                connection.close()
+        return minutes
+
+    def _get_last_published_time_for_feed(self, rss_feed_id):
+        """Вспомогательный метод: Получить время последней публикации из конкретной RSS-ленты"""
+        connection = None
+        cursor = None
+        published_time = None
+
+        try:
+            connection = psycopg2.connect(**DB_CONFIG)
+            cursor = connection.cursor()
+
+            query = """
+                SELECT created_at 
+                FROM published_news_data 
+                WHERE rss_feed_id = %s 
+                ORDER BY created_at DESC 
+                LIMIT 1
+            """
+
+            cursor.execute(query, (rss_feed_id,))
+            row = cursor.fetchone()
+            published_time = row[0] if row else None
+
+        except psycopg2.Error as e:
+            print(f"[DB] [RSSManager] Ошибка при получении времени последней публикации из конкретной RSS-ленты: {e}")
+            return published_time
+        finally:
+            if cursor:
+                cursor.close()
+            if connection:
+                connection.close()
+        return published_time
+
+    def _get_recent_news_count_for_feed(self, rss_feed_id, minutes=60):
+        """Вспомогательный метод: Получает количество новостей из ленты за последние N минут"""
+        connection = None
+        cursor = None
+        news_count = 0
+
+        try:
+            connection = psycopg2.connect(**DB_CONFIG)
+            cursor = connection.cursor()
+            cursor.execute("""
+                SELECT COUNT(*) 
+                FROM published_news_data 
+                WHERE rss_feed_id = %s 
+                AND created_at >= NOW() - INTERVAL '%s minutes'
+            """, (rss_feed_id, minutes))
+            row = cursor.fetchone()
+            news_count = row[0] if row else 0
+        except psycopg2.Error as err:
+            print(f"[DB] [RSSManager] Ошибка в _get_recent_news_count_for_feed: {err}")
+            return news_count
+        finally:
+            if cursor:
+                cursor.close()
+            if connection:
+                connection.close()
+        return news_count
+
+    def _get_max_news_per_hour_for_feed(self, rss_feed_id):
+        """Вспомогательный метод: Получает максимальное количество новостей в час для ленты"""
+        connection = None
+        cursor = None
+        max_news = 1
+
+        try:
+            connection = psycopg2.connect(**DB_CONFIG)
+            cursor = connection.cursor()
+            cursor.execute("""
+                SELECT cooldown_minutes 
+                FROM rss_feeds 
+                WHERE id = %s
+            """, (rss_feed_id,))
+            row = cursor.fetchone()
+            
+            if row and row[0]:
+                cooldown_minutes = row[0]
+                # Более логичная формула: 60 минут в часе / интервал между новостями
+                max_news = max(1, round(60 / cooldown_minutes))
+                
+                # Но для очень больших интервалов лучше использовать прямое ограничение
+                if cooldown_minutes >= 60:
+                    # 1 новость на каждые полные 60 минут кулдауна
+                    max_news = max(1, 60 // cooldown_minutes)
+                    
+                return max_news
+            else:
+                return 1  # По умолчанию 1 новость в час
+        except psycopg2.Error as err:
+            print(f"[DB] [RSSManager] Ошибка в _get_max_news_per_hour_for_feed: {err}")
+            return 3
+        finally:
+            if cursor:
+                cursor.close()
+            if connection:
+                connection.close()
+        return max_news
+
     # --- Публичные асинхронные методы ---
     # Эти методы будут вызываться из вашего асинхронного кода.
     # Они оборачивают вспомогательные методы в run_in_executor.
@@ -423,7 +550,28 @@ class RSSManager:
         """Асинхронно получить список всех категорий."""
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, self._get_categories)
-    
+
+    async def get_feed_cooldown_minutes(self, rss_feed_id):
+        """Асинхронно получить время кулдауна в минутах для конкретной RSS-ленты"""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._get_feed_cooldown_minutes, rss_feed_id)
+
+    async def get_last_published_time_for_feed(self, rss_feed_id):
+        """Асинхронно получить время последней публикации из конкретной RSS-ленты"""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._get_last_published_time_for_feed, rss_feed_id)
+
+    async def get_recent_news_count_for_feed(self, rss_feed_id, minutes=60):
+        """Асинхронно получает количество новостей из ленты за последние N минут"""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._get_recent_news_count_for_feed, rss_feed_id, minutes)
+
+    async def get_max_news_per_hour_for_feed(self, rss_feed_id):
+        """Асинхронно получает максимальное количество новостей в час для ленты"""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._get_max_news_per_hour_for_feed, rss_feed_id)
+
+
     def is_news_new(self, title_hash, content_hash, url):
         """
         Проверяет, является ли новость новой (не опубликованной ранее).
@@ -466,7 +614,7 @@ class RSSManager:
                 connection.close()
                 # print("[DB] [is_news_new] Соединение закрыто") # Опционально
 
-    def mark_as_published(self, title, content, url, original_language, translations_dict, category_name=None, image_filename=None):
+    def mark_as_published(self, title, content, url, original_language, translations_dict, category_name=None, image_filename=None, rss_feed_id=None):
         """
         Сохраняет информацию о опубликованной новости с проверкой уникальности (хэши).
         Сохраняет оригинальные данные и переводы новости для API.
@@ -474,6 +622,7 @@ class RSSManager:
 
         :param category_name: название категории (опционально)
         :param image_filename: имя файла изображения (опционально)
+        :param rss_feed_id: ID RSS-ленты (опционально)
         """
         # 1. Генерируем ID ОДИН РАЗ
         title_hash = hashlib.sha256(title.encode('utf-8')).hexdigest()
@@ -545,7 +694,6 @@ class RSSManager:
                 else:
                     print(f"[DB] [DEBUG] Записи с таким ID, title_hash или content_hash в 'published_news' НЕ НАЙДЕНЫ.")
                 # Возвращаем False вместо исключения, чтобы не прерывать всю задачу
-                # Исключение будет перехвачено run_in_executor и превращено в failed future
                 return False 
             else:
                 print(f"[DB] [mark_as_published] Подтверждено: запись в 'published_news' существует ПОСЛЕ КОММИТА. (ID: {short_id})")
@@ -554,14 +702,15 @@ class RSSManager:
             # 3. ВСТАВЛЯЕМ или ОБНОВЛЯЕМ в дочерней таблице published_news_data
             query_published_news_data = """
             INSERT INTO published_news_data 
-            (news_id, original_title, original_content, original_language, category_id, image_filename, created_at, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, NOW(), NOW())
+            (news_id, original_title, original_content, original_language, category_id, image_filename, rss_feed_id, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
             ON CONFLICT (news_id) DO UPDATE SET
                 original_title = EXCLUDED.original_title,
                 original_content = EXCLUDED.original_content,
                 original_language = EXCLUDED.original_language,
                 category_id = EXCLUDED.category_id,
                 image_filename = EXCLUDED.image_filename,
+                rss_feed_id = EXCLUDED.rss_feed_id,
                 updated_at = NOW()
             """
             print(f"[DB] [mark_as_published] Подготовка запроса к 'published_news_data' (ID: {short_id})")
@@ -571,7 +720,8 @@ class RSSManager:
                 content, 
                 original_language, 
                 category_id,
-                image_filename
+                image_filename,
+                rss_feed_id
             ))
             print(f"[DB] [mark_as_published] Выполнен запрос к 'published_news_data'. (ID: {short_id})")
 
@@ -712,10 +862,7 @@ class RSSManager:
 
     async def fetch_news(self):
         """Асинхронная функция для получения новостей из RSS-лент"""
-        seen_keys = set() # Этот set будет разделяться между задачами, но только для чтения/записи в текущей итерации fetch_news
-                          # Это может привести к гонке данных, но для простоты и скорости оставим.
-                          # Для строгой асинхронной безопасности лучше передавать его в каждую задачу
-                          # или использовать asyncio.Lock, но это усложнит код.
+        seen_keys = set()
         all_news = []
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
@@ -726,26 +873,30 @@ class RSSManager:
             print(f"[RSS] Найдено {len(active_feeds)} активных RSS-лент.")
 
             if not active_feeds:
-                 print("[RSS] Нет активных лент для парсинга.")
-                 return []
+                print("[RSS] Нет активных лент для парсинга.")
+                return []
 
-            # Создаем список задач для парсинга каждой ленты
+            # Создаем список задач для парсинга каждой ленты, передаем feed_id
             tasks = [
                 self.fetch_single_feed(feed_info, seen_keys, headers)
                 for feed_info in active_feeds
             ]
 
             # Выполняем все задачи одновременно
-            # return_exceptions=True позволяет продолжить выполнение других задач,
-            # если одна из них выбросит исключение
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
             # Обрабатываем результаты
             for i, result in enumerate(results):
-                feed_url = active_feeds[i]['url'] if i < len(active_feeds) else "Unknown Feed"
+                feed_info = active_feeds[i] if i < len(active_feeds) else None
+                feed_url = feed_info['url'] if feed_info else "Unknown Feed"
+                feed_id = feed_info['id'] if feed_info else None
+                
                 if isinstance(result, Exception):
                     print(f"[RSS] [ERROR] Исключение при парсинге {feed_url}: {result}")
-                elif isinstance(result, list): # Ожидаемый тип результата
+                elif isinstance(result, list):
+                    # Добавляем rss_feed_id к каждой новости
+                    for news_item in result:
+                        news_item['rss_feed_id'] = feed_id
                     all_news.extend(result)
                 else:
                     print(f"[RSS] [WARN] Неожиданный тип результата для {feed_url}: {type(result)}")

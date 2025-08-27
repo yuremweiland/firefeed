@@ -686,11 +686,8 @@ async def send_personal_news(bot, news_item: dict, translations_dict: dict):
                 description_to_send = news_item.get('description', '')
                 # category_to_send = category # Если нужно
             
-            # --- Очистка HTML (если еще не очищена на этапе перевода) ---
-            # Предполагается, что очистка уже была выполнена в prepare_translations.
-            # Если нет, раскомментируйте строки ниже:
-            # title_to_send = clean_html(title_to_send) 
-            # description_to_send = clean_html(description_to_send)
+            title_to_send = clean_html(title_to_send) 
+            description_to_send = clean_html(description_to_send)
 
             # --- Формирование примечания о переводе ---
             lang_note = ""
@@ -882,13 +879,31 @@ async def process_news_item(context, rss_manager, news):
     """
     Основная функция обработки новости
     """
-    # 1. Сначала извлекаем и сохраняем изображение
     news_id = news.get('id')
     news_link = news.get('link')
+    rss_feed_id = news.get('rss_feed_id')
     image_filename = None
     local_image_path = None
+    loop = asyncio.get_event_loop()
     
-    # 2. Готовим переводы (эта функция уже async)
+    cooldown_minutes = await rss_manager.get_feed_cooldown_minutes(rss_feed_id)
+    max_news_per_hour = await rss_manager.get_max_news_per_hour_for_feed(rss_feed_id)
+    recent_count = await rss_manager.get_recent_news_count_for_feed(rss_feed_id, 60)
+    
+    if recent_count >= max_news_per_hour:
+        print(f"[SKIP] Лента ID {rss_feed_id} достигла лимита {max_news_per_hour} новостей в час. Опубликовано: {recent_count}")
+        return False
+    
+    # Проверка кулдауна (время последней публикации)
+    last_published = await rss_manager.get_last_published_time_for_feed(rss_feed_id)
+
+    if last_published:
+        elapsed = datetime.datetime.now(datetime.timezone.utc) - last_published
+        if elapsed < datetime.timedelta(minutes=cooldown_minutes):
+            print(f"[SKIP] Лента ID {rss_feed_id} находится на кулдауне ({cooldown_minutes} мин). Прошло: {elapsed}")
+            return False
+    
+    # 2. Готовим переводы
     translations = await prepare_translations(
         title=news['title'],
         description=news['description'],
@@ -903,21 +918,20 @@ async def process_news_item(context, rss_manager, news):
             if local_image_path and os.path.exists(local_image_path):
                 image_filename = os.path.basename(local_image_path)
 
-    # --- Обновленный вызов mark_as_published ---
     loop = asyncio.get_event_loop()
     # Передаем сам объект rss_manager и все необходимые аргументы
     success_db = await loop.run_in_executor(
         None,
-        rss_manager.mark_as_published, # Метод для вызова
-        news['title'],                 # arg 1
-        news['description'],           # arg 2
-        news['link'],                  # arg 3
-        news['lang'],                  # arg 4
-        translations,                  # arg 5
-        news['category'],              # arg 6 (category_name)
-        image_filename                 # arg 7
+        rss_manager.mark_as_published,
+        news['title'],           # title
+        news['description'],     # content
+        news['link'],           # url
+        news['lang'],           # original_language
+        translations,           # translations_dict
+        news['category'],       # category_name
+        image_filename,         # image_filename
+        rss_feed_id             # rss_feed_id - добавлено
     )
-    # --- Конец обновленного вызова ---
 
     if success_db:
         print("[MAIN] Данные новости успешно обработаны и сохранены в БД.")
