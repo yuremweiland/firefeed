@@ -45,6 +45,69 @@ class FireFeedDuplicateDetector:
     def _combine_text_fields(self, title: str, content: str) -> str:
         """Комбинирование заголовка и содержания для создания эмбеддинга"""
         return f"{title} {content[:500]}"  # Ограничиваем длину для производительности
+
+    async def _get_embedding_by_id(self, news_id: str) -> Optional[List[float]]:
+        """Получение существующего эмбеддинга по ID новости"""
+        pool = None
+        try:
+            pool = await self._get_db_pool()
+            async with pool.acquire() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute("""
+                        SELECT embedding 
+                        FROM published_news_data 
+                        WHERE news_id = %s AND embedding IS NOT NULL
+                    """, (news_id,))
+                    
+                    result = await cur.fetchone()
+                    if result and result[0] is not None:
+                        # Преобразуем из строки в список, если нужно
+                        if isinstance(result[0], str):
+                            return json.loads(result[0])
+                        return result[0]
+                    return None
+        except Exception as e:
+            logger.error(f"[DUBLICATE_DETECTOR] Ошибка при получении эмбеддинга для новости {news_id}: {e}")
+            return None
+        finally:
+            if pool:
+                pool.close()
+                await pool.wait_closed()
+
+    async def _is_duplicate_with_embedding(self, news_id: str, embedding: List[float]) -> Tuple[bool, Optional[Dict[str, Any]]]:
+        """Проверка дубликата с уже имеющимся эмбеддингом"""
+        try:
+            # Ищем похожие новости, исключая текущую
+            similar_news = await self.get_similar_news(embedding, current_news_id=news_id, limit=5)
+
+            # Проверяем схожесть
+            for news in similar_news:
+                if news['embedding'] is not None:
+                    # Преобразуем строковое представление эмбеддинга
+                    try:
+                        if isinstance(news['embedding'], str):
+                            stored_embedding_array = np.array(json.loads(news['embedding']))
+                        elif isinstance(news['embedding'], (list, np.ndarray)):
+                            stored_embedding_array = np.array(news['embedding'], dtype=float)
+                        else:
+                            continue
+                    except (json.JSONDecodeError, ValueError) as e:
+                        logger.error(f"[DUBLICATE_DETECTOR] Ошибка преобразования эмбеддинга из БД: {e}")
+                        continue
+
+                    new_embedding_array = np.array(embedding)
+                    
+                    similarity = cosine_similarity([stored_embedding_array], [new_embedding_array])[0][0]
+                    
+                    if similarity > self.similarity_threshold:
+                        logger.info(f"[DUBLICATE_DETECTOR] Найден дубликат с схожестью {similarity:.4f}")
+                        return True, news
+
+            return False, None
+            
+        except Exception as e:
+            logger.error(f"[DUBLICATE_DETECTOR] Ошибка при проверке дубликата с эмбеддингом: {e}")
+            raise
     
     async def generate_embedding(self, title: str, content: str) -> List[float]:
         """
@@ -89,12 +152,13 @@ class FireFeedDuplicateDetector:
                 pool.close()
                 await pool.wait_closed()
     
-    async def get_similar_news(self, embedding: List[float], limit: int = 10) -> List[Dict[str, Any]]:
+    async def get_similar_news(self, embedding: List[float], current_news_id: str = None, limit: int = 10) -> List[Dict[str, Any]]:
         """
         Поиск похожих новостей в базе данных
         
         Args:
             embedding: Эмбеддинг для поиска
+            current_news_id: ID текущей новости (чтобы исключить её из результатов)
             limit: Максимальное количество результатов
             
         Returns:
@@ -105,15 +169,25 @@ class FireFeedDuplicateDetector:
             pool = await self._get_db_pool()
             async with pool.acquire() as conn:
                 async with conn.cursor() as cur:
-                    # Ищем новости с существующими эмбеддингами
-                    # Явно приводим массив к типу vector
-                    await cur.execute("""
-                        SELECT news_id, original_title, original_content, embedding
-                        FROM published_news_data 
-                        WHERE embedding IS NOT NULL
-                        ORDER BY embedding <-> %s::vector 
-                        LIMIT %s
-                    """, (embedding, limit))
+                    if current_news_id:
+                        # Исключаем текущую новость из поиска
+                        await cur.execute("""
+                            SELECT news_id, original_title, original_content, embedding
+                            FROM published_news_data 
+                            WHERE embedding IS NOT NULL 
+                            AND news_id != %s
+                            ORDER BY embedding <-> %s::vector 
+                            LIMIT %s
+                        """, (current_news_id, embedding, limit))
+                    else:
+                        # Если ID не предоставлен, ищем среди всех новостей
+                        await cur.execute("""
+                            SELECT news_id, original_title, original_content, embedding
+                            FROM published_news_data 
+                            WHERE embedding IS NOT NULL
+                            ORDER BY embedding <-> %s::vector 
+                            LIMIT %s
+                        """, (embedding, limit))
                     
                     results = await cur.fetchall()
                     return [dict(zip([column[0] for column in cur.description], row)) for row in results]
@@ -125,11 +199,12 @@ class FireFeedDuplicateDetector:
                 pool.close()
                 await pool.wait_closed()
     
-    async def is_duplicate(self, title: str, content: str) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    async def is_duplicate(self, news_id: str, title: str, content: str) -> Tuple[bool, Optional[Dict[str, Any]]]:
         """
         Проверка, является ли новость дубликатом
 
         Args:
+            news_id: ID новости (для исключения из поиска)
             title: Заголовок новости
             content: Содержание новости
 
@@ -141,8 +216,8 @@ class FireFeedDuplicateDetector:
             # Генерируем эмбеддинг для новой новости
             embedding = await self.generate_embedding(title, content)
 
-            # Ищем похожие новости
-            similar_news = await self.get_similar_news(embedding, limit=5)
+            # Ищем похожие новости, исключая текущую
+            similar_news = await self.get_similar_news(embedding, current_news_id=news_id, limit=5)
 
             # Проверяем схожесть
             for news in similar_news:
@@ -198,18 +273,35 @@ class FireFeedDuplicateDetector:
         """
         pool = None
         try:
-            # Проверяем на дубликат
-            is_dup, duplicate_info = await self.is_duplicate(title, content)
+            # Сначала проверяем, есть ли уже эмбеддинг для этой новости
+            existing_embedding = await self._get_embedding_by_id(news_id)
+            
+            # Если эмбеддинг уже существует, используем его для проверки дубликатов
+            if existing_embedding is not None:
+                logger.debug(f"[DUBLICATE_DETECTOR] Эмбеддинг для новости {news_id} уже существует")
+                # Проверяем на дубликат, используя существующий эмбеддинг
+                is_dup, duplicate_info = await self._is_duplicate_with_embedding(
+                    news_id, existing_embedding
+                )
+            else:
+                # Если эмбеддинга нет, генерируем новый
+                logger.debug(f"[DUBLICATE_DETECTOR] Генерируем новый эмбеддинг для новости {news_id}")
+                embedding = await self.generate_embedding(title, content)
+                
+                # Проверяем на дубликат с новым эмбеддингом
+                is_dup, duplicate_info = await self._is_duplicate_with_embedding(
+                    news_id, embedding
+                )
+                
+                # Если не дубликат, сохраняем эмбеддинг
+                if not is_dup:
+                    await self.save_embedding(news_id, embedding)
             
             if is_dup:
                 logger.info(f"[DUBLICATE_DETECTOR] Новость {news_id} является дубликатом новости {duplicate_info['news_id']}")
                 return False
             
-            # Если не дубликат, сохраняем эмбеддинг
-            embedding = await self.generate_embedding(title, content)
-            await self.save_embedding(news_id, embedding)
-            
-            logger.info(f"[DUBLICATE_DETECTOR] Новость {news_id} уникальна и добавлена в базу")
+            logger.info(f"[DUBLICATE_DETECTOR] Новость {news_id} уникальна")
             return True
             
         except Exception as e:
