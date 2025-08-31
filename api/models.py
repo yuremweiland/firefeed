@@ -1,11 +1,10 @@
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Dict
 
-# Модель для представления одного перевода
-class Translation(BaseModel):
-    language: str
-    title: str
-    content: str
+# Модель для представления перевода на конкретный язык
+class LanguageTranslation(BaseModel):
+    title: Optional[str] = None
+    content: Optional[str] = None
 
 # Модель для представления новости в API
 class NewsItem(BaseModel):
@@ -13,22 +12,15 @@ class NewsItem(BaseModel):
     original_title: str
     original_content: str
     original_language: str
-    image_filename: Optional[str] = None
+    image_url: Optional[str] = None
     category: Optional[str] = None
-    source: Optional[str] = None # Имя источника новости
-    title_ru: Optional[str] = None
-    content_ru: Optional[str] = None
-    title_en: Optional[str] = None
-    content_en: Optional[str] = None
-    title_de: Optional[str] = None
-    content_de: Optional[str] = None
-    title_fr: Optional[str] = None
-    content_fr: Optional[str] = None
+    source: Optional[str] = None  # Имя источника новости
     source_url: Optional[str] = None
-    published_at: Optional[str] = None # ISO формат даты-времени
+    published_at: Optional[str] = None  # ISO формат даты-времени
+    translations: Optional[Dict[str, LanguageTranslation]] = None
 
     class Config:
-        from_attributes = True # Для совместимости с ORM (если будете использовать)
+        from_attributes = True  # Для совместимости с ORM (если будете использовать)
 
 class CategoryItem(BaseModel):
     id: int

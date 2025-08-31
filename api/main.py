@@ -3,13 +3,13 @@ from fastapi.middleware.cors import CORSMiddleware # Для CORS
 from typing import List, Optional
 import sys
 import os
-import asyncio
 
 # Добавляем корень проекта и папку api в путь поиска модулей
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'api'))
 
 from api import database, models # Импортируем наши модули
+import config  # Импортируем конфигурационный файл
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import StreamingResponse
@@ -61,6 +61,38 @@ def format_datetime(dt_obj):
     """Форматирует объект datetime в строку ISO."""
     return dt_obj.isoformat() if dt_obj else None
 
+# --- Вспомогательная функция для формирования полного URL изображения ---
+def get_full_image_url(image_filename: str) -> str:
+    """Формирует полный URL для изображения, добавляя HTTP_IMAGES_ROOT_DIR."""
+    if not image_filename:
+        return None
+    # Убираем слэш в начале HTTP_IMAGES_ROOT_DIR, если он есть, чтобы избежать дублирования
+    base_url = config.HTTP_IMAGES_ROOT_DIR.rstrip('/')
+    # Убираем слэш в начале image_filename, если он есть
+    filename = image_filename.lstrip('/')
+    return f"{base_url}/{filename}"
+
+# --- Вспомогательная функция для формирования структуры переводов ---
+def build_translations_dict(row_dict):
+    """Формирует структуру переводов из данных строки."""
+    translations = {}
+    languages = ['ru', 'en', 'de', 'fr']
+    
+    for lang in languages:
+        title_key = f'title_{lang}'
+        content_key = f'content_{lang}'
+        title = row_dict.get(title_key)
+        content = row_dict.get(content_key)
+        
+        # Добавляем в словарь только если есть данные
+        if title is not None or content is not None:
+            translations[lang] = {
+                "title": title,
+                "content": content
+            }
+    
+    return translations
+
 # --- Endpoints ---
 
 @app.get("/api/news/", response_model=List[models.NewsItem], summary="Получить список новостей")
@@ -85,6 +117,9 @@ async def get_news(
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
             try:
+                # Начинаем с базовых параметров для JOIN'ов
+                query_params = []
+                
                 # JOIN с rss_feeds, categories и sources для получения имен категории и источника
                 query = """
                 SELECT 
@@ -93,8 +128,8 @@ async def get_news(
                     nd.original_content,
                     nd.original_language,
                     nd.image_filename,
-                    COALESCE(c.name, nd.category) AS category_name, -- Имя категории из справочника или из старого поля
-                    COALESCE(s.name, 'Unknown Source') AS source_name, -- Имя источника
+                    COALESCE(c.name, 'Unknown Category') AS category_name,
+                    COALESCE(s.name, 'Unknown Source') AS source_name,
                     pn.source_url,
                     pn.published_at,
                     COALESCE(nt_display.translated_title, nd.original_title) as display_title,
@@ -109,41 +144,42 @@ async def get_news(
                     nt_fr.translated_content as content_fr
                 FROM published_news_data nd
                 LEFT JOIN published_news pn ON nd.news_id = pn.id
-                -- JOIN с rss_feeds, categories и sources для получения имен категории и источника
-                -- Предположим, что URL или часть его может быть связующим звеном.
-                -- Или если в published_news_data добавлен feed_id, использовать его.
-                -- Пока используем косвенную связь через URL.
-                -- Более надежный способ: добавить feed_id в published_news_data при сохранении.
-                -- Для совместимости, делаем LEFT JOIN по URL.
-                LEFT JOIN rss_feeds rf ON pn.source_url LIKE CONCAT(rf.url, '%') OR rf.url LIKE CONCAT(pn.source_url, '%') -- Пример косвенной связи
-                LEFT JOIN categories c ON rf.category_id = c.id -- Получаем имя категории
-                LEFT JOIN sources s ON rf.source_id = s.id -- Получаем имя источника
-                LEFT JOIN news_translations nt_ru ON nd.news_id = nt_ru.news_id AND nt_ru.language = 'ru'
-                LEFT JOIN news_translations nt_en ON nd.news_id = nt_en.news_id AND nt_en.language = 'en'
-                LEFT JOIN news_translations nt_de ON nd.news_id = nt_de.news_id AND nt_de.language = 'de'
-                LEFT JOIN news_translations nt_fr ON nd.news_id = nt_fr.news_id AND nt_fr.language = 'fr'
+                LEFT JOIN rss_feeds rf ON pn.source_url LIKE CONCAT(rf.url, %s) OR rf.url LIKE CONCAT(pn.source_url, %s)
+                LEFT JOIN categories c ON nd.category_id = c.id
+                LEFT JOIN sources s ON rf.source_id = s.id
+                LEFT JOIN news_translations nt_ru ON nd.news_id = nt_ru.news_id AND nt_ru.language = %s
+                LEFT JOIN news_translations nt_en ON nd.news_id = nt_en.news_id AND nt_en.language = %s
+                LEFT JOIN news_translations nt_de ON nd.news_id = nt_de.news_id AND nt_de.language = %s
+                LEFT JOIN news_translations nt_fr ON nd.news_id = nt_fr.news_id AND nt_fr.language = %s
                 LEFT JOIN news_translations nt_display ON nd.news_id = nt_display.news_id AND nt_display.language = %s
                 WHERE 1=1
                 """
-                params = [display_language]
-                where_params = []
-
+                
+                # Добавляем параметры: сначала для LIKE условий, потом для языковых JOIN'ов
+                query_params.extend(['%%', '%%', 'ru', 'en', 'de', 'fr', display_language])
+                
+                # Добавляем фильтры в WHERE и соответствующие параметры
                 if original_language:
                     query += " AND nd.original_language = %s"
-                    where_params.append(original_language)
-                # Фильтруем по имени категории, а не по значению в published_news_data
+                    query_params.append(original_language)
                 if category:
-                    query += " AND c.name = %s" # Фильтр по имени категории из таблицы categories
-                    where_params.append(category)
+                    query += " AND c.name = %s"
+                    query_params.append(category)
                 if source:
-                    query += " AND s.name = %s" # Фильтр по имени источника из таблицы sources
-                    where_params.append(source)
-                query += " ORDER BY pn.published_at DESC LIMIT %s"
-                where_params.append(limit)
+                    query += " AND s.name = %s"
+                    query_params.append(source)
                 
-                full_params = params + where_params
+                # Добавляем ORDER BY и LIMIT
+                query += " ORDER BY pn.published_at DESC LIMIT %s"
+                query_params.append(limit)
+                
+                # Отладочный вывод
+                count_percent_s = query.count('%s')
+                print(f"[DEBUG] Query has {count_percent_s} %s placeholders")
+                print(f"[DEBUG] Query params count: {len(query_params)}")
+                print(f"[DEBUG] Query params: {query_params}")
 
-                await cur.execute(query, full_params)
+                await cur.execute(query, query_params)
                 results = []
                 async for row in cur:
                     results.append(row)
@@ -162,21 +198,12 @@ async def get_news(
                         "original_title": row_dict['original_title'],
                         "original_content": row_dict['original_content'],
                         "original_language": row_dict['original_language'],
-                        "image_filename": row_dict['image_filename'],
-                        "category": row_dict['category_name'], # Используем имя категории
-                        "source": row_dict['source_name'],     # Добавляем имя источника (если нужно в модели)
+                        "image_url": get_full_image_url(row_dict['image_filename']),
+                        "category": row_dict['category_name'],
+                        "source": row_dict['source_name'],
                         "source_url": row_dict['source_url'],
                         "published_at": format_datetime(row_dict['published_at']),
-                        f"title_{display_language}": row_dict['display_title'],
-                        f"content_{display_language}": row_dict['display_content'],
-                        "title_ru": row_dict['title_ru'],
-                        "content_ru": row_dict['content_ru'],
-                        "title_en": row_dict['title_en'],
-                        "content_en": row_dict['content_en'],
-                        "title_de": row_dict['title_de'],
-                        "content_de": row_dict['content_de'],
-                        "title_fr": row_dict['title_fr'],
-                        "content_fr": row_dict['content_fr'],
+                        "translations": build_translations_dict(row_dict)
                     }
                     news_list.append(models.NewsItem(**item_data))
                      
@@ -184,7 +211,7 @@ async def get_news(
 
             except Exception as e:
                 print(f"[API] Ошибка при выполнении запроса в get_news: {e}")
-                # traceback.print_exc() # Раскомментируйте для отладки
+                traceback.print_exc()
                 raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Внутренняя ошибка сервера")
 
 
@@ -202,8 +229,8 @@ async def get_news_by_id(news_id: str):
                 query = """
                 SELECT 
                     nd.*,
-                    COALESCE(c.name, nd.category) AS category_name, -- Имя категории
-                    COALESCE(s.name, 'Unknown Source') AS source_name, -- Имя источника
+                    COALESCE(c.name, 'Unknown Category') AS category_name,
+                    COALESCE(s.name, 'Unknown Source') AS source_name,
                     pn.source_url,
                     pn.published_at,
                     nt_ru.translated_title as title_ru,
@@ -216,16 +243,18 @@ async def get_news_by_id(news_id: str):
                     nt_fr.translated_content as content_fr
                 FROM published_news_data nd
                 LEFT JOIN published_news pn ON nd.news_id = pn.id
-                LEFT JOIN rss_feeds rf ON pn.source_url LIKE CONCAT(rf.url, '%') OR rf.url LIKE CONCAT(pn.source_url, '%')
-                LEFT JOIN categories c ON rf.category_id = c.id
+                LEFT JOIN rss_feeds rf ON pn.source_url LIKE CONCAT(rf.url, %s) OR rf.url LIKE CONCAT(pn.source_url, %s)
+                LEFT JOIN categories c ON nd.category_id = c.id
                 LEFT JOIN sources s ON rf.source_id = s.id
-                LEFT JOIN news_translations nt_ru ON nd.news_id = nt_ru.news_id AND nt_ru.language = 'ru'
-                LEFT JOIN news_translations nt_en ON nd.news_id = nt_en.news_id AND nt_en.language = 'en'
-                LEFT JOIN news_translations nt_de ON nd.news_id = nt_de.news_id AND nt_de.language = 'de'
-                LEFT JOIN news_translations nt_fr ON nd.news_id = nt_fr.news_id AND nt_fr.language = 'fr'
+                LEFT JOIN news_translations nt_ru ON nd.news_id = nt_ru.news_id AND nt_ru.language = %s
+                LEFT JOIN news_translations nt_en ON nd.news_id = nt_en.news_id AND nt_en.language = %s
+                LEFT JOIN news_translations nt_de ON nd.news_id = nt_de.news_id AND nt_de.language = %s
+                LEFT JOIN news_translations nt_fr ON nd.news_id = nt_fr.news_id AND nt_fr.language = %s
                 WHERE nd.news_id = %s
                 """
-                await cur.execute(query, (news_id,))
+                query_params = ['%%', '%%', 'ru', 'en', 'de', 'fr', news_id]
+                
+                await cur.execute(query, query_params)
                 result = await cur.fetchone()
 
                 if result is None:
@@ -240,22 +269,12 @@ async def get_news_by_id(news_id: str):
                     "original_title": result_dict['original_title'],
                     "original_content": result_dict['original_content'],
                     "original_language": result_dict['original_language'],
-                    "image_filename": result_dict['image_filename'],
-                    "category": result_dict['category_name'], # Используем имя категории
-                    "source": result_dict['source_name'],     # Добавляем имя источника
+                    "image_url": get_full_image_url(result_dict['image_filename']),
+                    "category": result_dict['category_name'],
+                    "source": result_dict['source_name'],
                     "source_url": result_dict['source_url'],
                     "published_at": format_datetime(result_dict['published_at']),
-                    "title_ru": result_dict['title_ru'],
-                    "content_ru": result_dict['content_ru'],
-                    "title_en": result_dict['title_en'],
-                    "content_en": result_dict['content_en'],
-                    "title_de": result_dict['title_de'],
-                    "content_de": result_dict['content_de'],
-                    "title_fr": result_dict['title_fr'],
-                    "content_fr": result_dict['content_fr'],
-                    # Fallback для display_ полей (можно уточнить логику)
-                    "title_en": result_dict['title_en'] or result_dict['original_title'],
-                    "content_en": result_dict['content_en'] or result_dict['original_content'],
+                    "translations": build_translations_dict(result_dict)
                 }
 
                 return models.NewsItem(**item_data)
@@ -264,7 +283,7 @@ async def get_news_by_id(news_id: str):
                 raise
             except Exception as e:
                 print(f"[API] Ошибка при выполнении запроса для ID {news_id} в get_news_by_id: {e}")
-                # traceback.print_exc()
+                traceback.print_exc()
                 raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Внутренняя ошибка сервера")
 
 
@@ -314,7 +333,7 @@ async def get_original_languages():
                 return [models.LanguageItem(language=row[0]) for row in results]
             except Exception as e:
                 print(f"[API] Ошибка при получении языков в get_original_languages: {e}")
-                # traceback.print_exc()
+                traceback.print_exc()
                 raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Внутренняя ошибка сервера")
 
 

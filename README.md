@@ -40,11 +40,11 @@ After=network.target
 Type=simple
 User=firefeed
 Group=firefeed
-WorkingDirectory=/var/www/firefeed/data/www/firefeed.net/integrations/telegram
+WorkingDirectory=/var/www/firefeed/data/integrations/telegram
 
 
 ExecStartPre=/bin/sh -c 'pids=$(lsof -t -i:5000); [ -n "$pids" ] && kill -9 $pids || true'
-ExecStart=/var/www/firefeed/data/www/firefeed.net/integrations/telegram/run_bot.sh
+ExecStart=/var/www/firefeed/data/integrations/telegram/run_bot.sh
 ExecStopPost=/bin/sh -c 'pids=$(lsof -t -i:5000); [ -n "$pids" ] && kill -9 $pids || true'
 
 Restart=on-failure
@@ -72,8 +72,8 @@ Type=simple
 User=firefeed
 Group=firefeed
 
-WorkingDirectory=/var/www/firefeed/data/www/firefeed.net/integrations/telegram
-ExecStart=/var/www/firefeed/data/www/firefeed.net/integrations/telegram/run_api.sh
+WorkingDirectory=/var/www/firefeed/data/integrations/telegram
+ExecStart=/var/www/firefeed/data/integrations/telegram/run_api.sh
 
 Restart=always
 RestartSec=5

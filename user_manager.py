@@ -1,7 +1,6 @@
 import aiopg
 import asyncio
 import json
-import time
 from config import DB_CONFIG
 
 class UserManager:

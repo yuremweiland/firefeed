@@ -8,8 +8,5 @@ eval "$(pyenv init -)"
 # Устанавливаем версию Python
 pyenv shell 3.13.6
 
-# Активируем виртуальное окружение
-source /var/www/firefeed/data/integrations/telegram/venv/bin/activate
-
 # Запускаем FastAPI через uvicorn
 uvicorn api.main:app --host 127.0.0.1 --port 8000

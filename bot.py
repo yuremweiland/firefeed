@@ -1,21 +1,18 @@
 import os
-import signal
 import asyncio
+import threading
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.error import NetworkError, BadRequest, TelegramError
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 from config import WEBHOOK_CONFIG, BOT_TOKEN, CHANNEL_IDS, CHANNEL_CATEGORIES, IMAGES_ROOT_DIR
-from functools import lru_cache
 from user_manager import UserManager
-from translator import translate_text, prepare_translations
 from tenacity import retry, stop_after_attempt, wait_exponential
 from rss_manager import RSSManager
 from firefeed_utils import clean_html, download_and_save_image, extract_image_from_preview
-from firefeed_dublicate_detector import FireFeedDuplicateDetector
 from firefeed_translations import get_message, LANG_NAMES, TRANSLATED_FROM_LABELS, READ_MORE_LABELS
-
-import requests
-from bs4 import BeautifulSoup
+from firefeed_dublicate_detector import FireFeedDuplicateDetector
+from firefeed_translator import FireFeedTranslator
+from firefeed_translator_task_queue import FireFeedTranslatorTaskQueue
 
 USER_STATES = {}
 USER_CURRENT_MENUS = {}
@@ -29,6 +26,8 @@ batch_processor_task = None
 rss_manager = None
 user_manager = None
 duplicate_detector = None
+translator = None
+translator_queue = None
 
 # Создаем клавиатуру меню
 def get_main_menu_keyboard(lang="en"):
@@ -82,9 +81,7 @@ async def get_current_user_language(user_id):
     except Exception as e:
         print(f"[ERROR] Ошибка получения языка для {user_id}: {e}")
         return "en"
-# @lru_cache(maxsize=1000)
-def cached_translate(text, source_lang, target_lang):
-    return translate_text(text, source_lang, target_lang)
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"[LOG] Вызов команды /start от пользователя {update.effective_user.id}")
     user = update.effective_user
@@ -96,6 +93,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(welcome_text, reply_markup=get_main_menu_keyboard(lang))
     USER_CURRENT_MENUS[user_id] = "main"
     print(f"[LOG] Установлено текущее меню для {user_id}: main")
+
 async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"[LOG] Вызов команды /settings от пользователя {update.effective_user.id}")
     try:
@@ -117,6 +115,7 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         print(f"[ERROR] Ошибка команды /settings для {update.effective_user.id}: {e}")
         lang = await get_current_user_language(update.effective_user.id)
         await update.message.reply_text(get_message("settings_error", lang))
+
 async def show_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
     print(f"[LOG] Отображение меню настроек для пользователя {user_id}")
     try:
@@ -146,6 +145,7 @@ async def show_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE,
         print(f"[LOG] Отправлено меню настроек пользователю {user_id}")
     except Exception as e:
         print(f"[ERROR] Ошибка в show_settings_menu для {user_id}: {e}")
+
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_manager = UserManager()
     query = update.callback_query
@@ -263,6 +263,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=get_main_menu_keyboard(current_lang)
         )
         USER_CURRENT_MENUS[user_id] = "main"
+
 async def show_settings_menu_from_callback(query, context, user_id: int):
     print(f"[LOG] Отображение меню настроек из callback для {user_id}")
     try:
@@ -293,6 +294,7 @@ async def show_settings_menu_from_callback(query, context, user_id: int):
         print(f"[LOG] Отправлено меню настроек пользователю {user_id}")
     except Exception as e:
         print(f"[ERROR] Ошибка в show_settings_menu_from_callback для {user_id}: {e}")
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"[LOG] Вызов команды /help от пользователя {update.effective_user.id}")
     user_id = update.effective_user.id
@@ -304,6 +306,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(help_text, parse_mode='HTML', reply_markup=get_main_menu_keyboard(lang))
     USER_CURRENT_MENUS[user_id] = "main"
     print(f"[LOG] Установлено текущее меню для {user_id}: main")
+
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_manager = UserManager()
     print(f"[LOG] Вызов команды /status от пользователя {update.effective_user.id}")
@@ -323,6 +326,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(status_text, parse_mode='HTML', reply_markup=get_main_menu_keyboard(lang))
     USER_CURRENT_MENUS[user_id] = "main"
     print(f"[LOG] Установлено текущее меню для {user_id}: main")
+
 async def handle_menu_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"[LOG] Обработка выбора меню от пользователя {update.effective_user.id}")
     user_id = update.effective_user.id
@@ -385,6 +389,7 @@ async def handle_menu_selection(update: Update, context: ContextTypes.DEFAULT_TY
             await change_language_command(update, context)
     else:
         print(f"[LOG] Неизвестный выбор меню для {user_id}: {text}")
+
 async def change_language_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print(f"[LOG] Вызов команды смены языка от пользователя {update.effective_user.id}")
     user_id = update.effective_user.id
@@ -404,6 +409,7 @@ async def change_language_command(update: Update, context: ContextTypes.DEFAULT_
     )
     USER_CURRENT_MENUS[user_id] = "language"
     print(f"[LOG] Установлено текущее меню для {user_id}: language")
+
 @retry(stop=stop_after_attempt(5), 
        wait=wait_exponential(multiplier=1, min=2, max=30))
 async def send_personal_news(bot, news_item: dict, translations_dict: dict):
@@ -431,8 +437,6 @@ async def send_personal_news(bot, news_item: dict, translations_dict: dict):
     if not subscribers:
         print(f"[LOG] Нет подписчиков для категории {category}.")
         return
-    # Получаем путь к локальному изображению (если оно было сохранено ранее)
-    local_image_path = news_item.get('image_filename')
 
     for user in subscribers:
         try:
@@ -469,8 +473,9 @@ async def send_personal_news(bot, news_item: dict, translations_dict: dict):
                 f"CATEGORY: {category}{lang_note}\n" # Используем оригинальную категорию или category_to_send
                 f"⚡ <a href='{news_item.get('link', '#')}'>{READ_MORE_LABELS.get(user_lang, 'Read more')}</a>"
             )
-            # --- Отправка в зависимости от наличия изображения ---
-            if local_image_path and os.path.exists(local_image_path):
+            image_filename = news_item.get('image_filename')
+            if image_filename and os.path.exists(os.path.join(IMAGES_ROOT_DIR, image_filename)):
+                absolute_image_path = os.path.join(IMAGES_ROOT_DIR, image_filename)
                 # Отправляем через send_photo с локальным файлом
                 caption = content_text
                 if len(caption) > 1024:
@@ -484,7 +489,7 @@ async def send_personal_news(bot, news_item: dict, translations_dict: dict):
                         caption = caption[:1021] + "..."
                 await bot.send_photo(
                     chat_id=user_id,
-                    photo=local_image_path,
+                    photo=absolute_image_path,
                     caption=caption,
                     parse_mode="HTML",
                     read_timeout=30,
@@ -552,11 +557,8 @@ async def post_to_channel(bot, news_item: dict, translations_dict: dict):
             # --- Отправка в зависимости от наличия изображения ---
             image_filename = news_item.get('image_filename')
 
-            print(f"[DEBUG] post_to_channel Путь к изображению: {image_filename}")
-
             if image_filename and os.path.exists(os.path.join(IMAGES_ROOT_DIR, image_filename)):
                 absolute_image_path = os.path.join(IMAGES_ROOT_DIR, image_filename)
-                print(f"[DEBUG] post_to_channel Отправляем абсолютный путь к изображению: {absolute_image_path}")
                 # Отправляем через send_photo с локальным файлом
                 caption = content_text
                 if len(caption) > 1024:
@@ -616,6 +618,8 @@ async def process_news_item(context, rss_manager, news):
     """
     Основная функция обработки новости
     """
+    global translator_queue
+    
     news_id = news.get('id')
     news_link = news.get('link')
     rss_feed_id = news.get('rss_feed_id')
@@ -625,22 +629,45 @@ async def process_news_item(context, rss_manager, news):
     
     print(f"[DEBUG] process_news_item: Начало обработки новости {news_id}")
 
-    # 1. Готовим переводы
-    print(f"[DEBUG] process_news_item: Перед вызовом prepare_translations для {news_id}")
+    # 1. Готовим переводы через очередь задач
+    print(f"[DEBUG] process_news_item: Перед добавлением задачи перевода для {news_id}")
+    
+    # Создаем future для ожидания результата
+    translation_result = asyncio.Future()
+    
+    # Callback функции для обработки результата
+    def on_translation_success(result, task_id=None):
+        if not translation_result.done():
+            translation_result.set_result(result)
+    
+    def on_translation_error(error_data):
+        if not translation_result.done():
+            translation_result.set_exception(Exception(error_data['error']))
+    
     try:
-        translations = await prepare_translations(
+        # Добавляем задачу в очередь
+        task_added = await translator_queue.add_task(
             title=news['title'],
             description=news['description'],
             category=news['category'],
-            original_lang=news['lang']
+            original_lang=news['lang'],
+            callback=on_translation_success,
+            error_callback=on_translation_error,
+            task_id=news_id  # Используем ID новости как task_id
         )
-        print(f"[DEBUG] process_news_item: После вызова prepare_translations для {news_id}")
+        
+        if not task_added:
+            print(f"[ERROR] process_news_item: Не удалось добавить задачу перевода для {news_id}")
+            translations = {}
+        else:
+            # Ждем результат перевода
+            translations = await translation_result
+            print(f"[DEBUG] process_news_item: Перевод завершен для {news_id}")
+            
     except Exception as e:
-        print(f"[ERROR] process_news_item: Ошибка в prepare_translations для {news_id}: {e}")
+        print(f"[ERROR] process_news_item: Ошибка при обработке перевода для {news_id}: {e}")
         import traceback
         traceback.print_exc()
-        # Можно решить, продолжать ли обработку без переводов или прервать
-        # Пока продолжаем с пустым словарем переводов
         translations = {}
 
     # 2. Обработка изображений
@@ -812,6 +839,26 @@ async def stop_batch_processor():
         except Exception as e:
             print(f"[ERROR] [BATCH_EMBEDDING] Ошибка при остановке задачи: {e}")
 
+async def cleanup_translator(application):
+    """Функция очистки ресурсов переводчика"""
+    print("[LOG] Начало очистки ресурсов переводчика...")
+    global translator_queue, translator
+    
+    if translator_queue:
+        try:
+            await translator_queue.wait_completion()  # Ждем завершения всех задач
+            await translator_queue.stop()             # Останавливаем очередь
+            print("[LOG] Очередь переводчика остановлена")
+        except Exception as e:
+            print(f"[ERROR] Ошибка остановки очереди: {e}")
+    
+    if translator:
+        try:
+            translator.shutdown()                     # Завершаем переводчик
+            print("[LOG] Переводчик завершен")
+        except Exception as e:
+            print(f"[ERROR] Ошибка завершения переводчика: {e}")
+
 async def post_stop(application: Application) -> None:
     """Функция, вызываемая при остановке приложения для корректного закрытия ресурсов"""
     global rss_manager, user_manager, duplicate_detector
@@ -837,23 +884,46 @@ async def post_stop(application: Application) -> None:
             print(f"[ERROR] Ошибка при закрытии пула UserManager: {e}")
 
     # Закрываем пул FireFeedDuplicateDetector (классовый пул)
+
     try:
         await FireFeedDuplicateDetector.close_pool()
         print("[LOG] Пул FireFeedDuplicateDetector закрыт")
     except Exception as e:
         print(f"[ERROR] Ошибка при закрытии пула FireFeedDuplicateDetector: {e}")
+
+    # Закрываем пул переводчика и выключаем его
+    await cleanup_translator(application)
     
     print("[LOG] Все пулы подключений закрыты")
 
 def main():
-    global rss_manager, user_manager, duplicate_detector
-    
+    global rss_manager, user_manager, duplicate_detector, translator, translator_queue
     print("[LOG] Запуск бота")
+
+    # Синхронная инициализация переводчика
+    translator = FireFeedTranslator(
+        device="cpu",
+        max_workers=4,
+        max_concurrent_translations=2
+    )
     
-    # Создаем один экземпляр детектора для всего приложения
+    # Синхронная инициализация очереди задач переводчика
+    translator_queue = FireFeedTranslatorTaskQueue(
+        translator, 
+        max_workers=2, 
+        queue_size=50
+    )
+    
+    # Создаем event loop для переводчика в отдельном потоке
+    def start_translator_loop():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(translator_queue.start())
+        loop.run_forever()
+    
+    translator_thread = threading.Thread(target=start_translator_loop, daemon=True)
+    translator_thread.start()
     duplicate_detector = FireFeedDuplicateDetector()
-    
-    # Передаем его в RSSManager
     rss_manager = RSSManager(duplicate_detector=duplicate_detector)
     user_manager = UserManager()
 
@@ -881,27 +951,10 @@ def main():
     # --- Добавляем запуск пакетной обработки эмбеддингов ---
     application.post_init = schedule_batch_processor
 
-    def signal_handler(sig, frame):
-        print("[LOG] Получен сигнал завершения...")
-        # Планируем остановку приложения корректно
-        try:
-            loop = asyncio.get_running_loop()
-            loop.call_soon(asyncio.create_task, application.stop())
-        except RuntimeError:
-            # Если loop не запущен, останавливаем его напрямую
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                loop.call_soon(asyncio.create_task, application.stop())
-            else:
-                loop.run_until_complete(application.stop())
-
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-
     print("[LOG] Бот запущен в режиме Webhook")
     
     try:
-        application.run_webhook(**WEBHOOK_CONFIG)
+        application.run_webhook(**WEBHOOK_CONFIG, close_loop=False)
     except (KeyboardInterrupt, SystemExit):
         print("[LOG] Прервано пользователем или системой...")
     except Exception as e:

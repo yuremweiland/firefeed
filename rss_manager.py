@@ -7,7 +7,6 @@ import pytz
 from datetime import datetime, timezone, timedelta
 from dateutil import parser
 from config import DB_CONFIG, MAX_ENTRIES_PER_FEED, MAX_TOTAL_NEWS
-from translator import prepare_translations
 
 class RSSManager:
     def __init__(self, duplicate_detector=None):
