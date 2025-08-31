@@ -1,11 +1,10 @@
 import os
 import signal
-import sys
 import asyncio
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
 from telegram.error import NetworkError, BadRequest, TelegramError
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
-from config import WEBHOOK_CONFIG, BOT_TOKEN, FIRE_EMOJI, CHANNEL_IDS, CHANNEL_CATEGORIES
+from config import WEBHOOK_CONFIG, BOT_TOKEN, CHANNEL_IDS, CHANNEL_CATEGORIES, IMAGES_ROOT_DIR
 from functools import lru_cache
 from user_manager import UserManager
 from translator import translate_text, prepare_translations
@@ -13,7 +12,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from rss_manager import RSSManager
 from firefeed_utils import clean_html, download_and_save_image, extract_image_from_preview
 from firefeed_dublicate_detector import FireFeedDuplicateDetector
-from firefeed_translations import get_message, LANG_NAMES, MESSAGES, TRANSLATED_FROM_LABELS, READ_MORE_LABELS, SELECT_CATEGORIES_LABELS
+from firefeed_translations import get_message, LANG_NAMES, TRANSLATED_FROM_LABELS, READ_MORE_LABELS
 
 import requests
 from bs4 import BeautifulSoup
@@ -25,6 +24,11 @@ USER_LANGUAGES = {}
 SEND_SEMAPHORE = asyncio.Semaphore(5)
 # --- Переменная для хранения задачи пакетной обработки ---
 batch_processor_task = None
+
+# Глобальные переменные для менеджеров
+rss_manager = None
+user_manager = None
+duplicate_detector = None
 
 # Создаем клавиатуру меню
 def get_main_menu_keyboard(lang="en"):
@@ -115,7 +119,6 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(get_message("settings_error", lang))
 async def show_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
     print(f"[LOG] Отображение меню настроек для пользователя {user_id}")
-    rss_manager = RSSManager()
     try:
         state = USER_STATES.get(user_id)
         if not state:
@@ -262,7 +265,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         USER_CURRENT_MENUS[user_id] = "main"
 async def show_settings_menu_from_callback(query, context, user_id: int):
     print(f"[LOG] Отображение меню настроек из callback для {user_id}")
-    rss_manager = RSSManager()
     try:
         state = USER_STATES.get(user_id)
         if not state:
@@ -430,17 +432,8 @@ async def send_personal_news(bot, news_item: dict, translations_dict: dict):
         print(f"[LOG] Нет подписчиков для категории {category}.")
         return
     # Получаем путь к локальному изображению (если оно было сохранено ранее)
-    local_image_path = None
-    if news_id:
-        # Предполагаем, что изображения сохраняются в директорию "/var/www/firefeed/data/www/firefeed.net/data/images"
-        # и имя файла формируется как {news_id}.{extension}
-        image_extensions = ['.jpg', '.jpeg', '.png', '.webp']
-        for ext in image_extensions:
-            potential_path = os.path.join("/var/www/firefeed/data/www/firefeed.net/data/images", f"{news_id}{ext}")
-            loop = asyncio.get_event_loop()
-            if await loop.run_in_executor(None, os.path.exists, potential_path):
-                local_image_path = potential_path
-                break
+    local_image_path = news_item.get('image_filename')
+
     for user in subscribers:
         try:
             user_id = user['id']
@@ -466,7 +459,7 @@ async def send_personal_news(bot, news_item: dict, translations_dict: dict):
             lang_note = ""
             original_news_lang = news_item.get('lang', '')
             if user_lang != original_news_lang:
-                 lang_note = f"\n🌐 {TRANSLATED_FROM_LABELS.get(user_lang, 'Translated from')} {original_news_lang.upper()}"
+                 lang_note = f"\n\n🌐 {TRANSLATED_FROM_LABELS.get(user_lang, 'Translated from')} {original_news_lang.upper()}"
             # --- Формирование сообщения ---
             # Используем .get() с дефолтными значениями для надежности
             content_text = (
@@ -491,7 +484,7 @@ async def send_personal_news(bot, news_item: dict, translations_dict: dict):
                         caption = caption[:1021] + "..."
                 await bot.send_photo(
                     chat_id=user_id,
-                    photo=local_image_path,  # Используем локальный путь
+                    photo=local_image_path,
                     caption=caption,
                     parse_mode="HTML",
                     read_timeout=30,
@@ -528,22 +521,9 @@ async def post_to_channel(bot, news_item: dict, translations_dict: dict):
     """
     original_title = news_item['title']
     news_id = news_item.get('id')  # Получаем ID новости
+    print(f"[DEBUG] post_to_channel news_item = {news_item}")
     print(f"[LOG] Публикация новости в каналы: {original_title[:50]}...")
-    # Получаем путь к локальному изображению (если оно было сохранено ранее)
-    local_image_path = None
-    if news_id:
-        # Предполагаем, что изображения сохраняются в директорию "/var/www/firefeed/data/www/firefeed.net/data/images"
-        # и имя файла формируется как {news_id}.{extension}
-        image_extensions = ['.jpg', '.jpeg', '.png', '.webp']
-        for ext in image_extensions:
-            potential_path = os.path.join("/var/www/firefeed/data/www/firefeed.net/data/images", f"{news_id}{ext}")
-            loop = asyncio.get_event_loop()
-            if await loop.run_in_executor(None, os.path.exists, potential_path):
-                local_image_path = potential_path
-                break
-    # Добавь эти принты после извлечения данных:
-    print(f"[DEBUG] news_id: {news_id}")
-    print(f"[DEBUG] local_image_path: {local_image_path}")
+
     for target_lang, channel_id in CHANNEL_IDS.items():
         try:
             await asyncio.sleep(0.5) # По-прежнему нужно для соблюдения лимитов Telegram
@@ -560,17 +540,23 @@ async def post_to_channel(bot, news_item: dict, translations_dict: dict):
             needs_translation_note = original_lang != target_lang
             lang_note = ""
             if needs_translation_note:
-                lang_note = f"\n🌐 {TRANSLATED_FROM_LABELS.get(target_lang, 'Translated from')} {original_lang.upper()}"
+                lang_note = f"\n\n🌐 {TRANSLATED_FROM_LABELS.get(target_lang, 'Translated from')} {original_lang.upper()}"
             # --- Формирование хэштегов ---
             hashtags = f"\n#{translated_category} #{news_item.get('source', 'UnknownSource')}"
             has_description = bool(description and description.strip())
             # --- Формирование базового контента ---
             content_text = f"<b>{title}</b>"
             if has_description:
-                content_text += f"\n{description}"
+                content_text += f"\n\n{description}"
             content_text += f"{lang_note}\n{hashtags}"
             # --- Отправка в зависимости от наличия изображения ---
-            if local_image_path and os.path.exists(local_image_path):
+            image_filename = news_item.get('image_filename')
+
+            print(f"[DEBUG] post_to_channel Путь к изображению: {image_filename}")
+
+            if image_filename and os.path.exists(os.path.join(IMAGES_ROOT_DIR, image_filename)):
+                absolute_image_path = os.path.join(IMAGES_ROOT_DIR, image_filename)
+                print(f"[DEBUG] post_to_channel Отправляем абсолютный путь к изображению: {absolute_image_path}")
                 # Отправляем через send_photo с локальным файлом
                 caption = content_text
                 if len(caption) > 1024:
@@ -584,7 +570,7 @@ async def post_to_channel(bot, news_item: dict, translations_dict: dict):
                         caption = caption[:1021] + "..."
                 await bot.send_photo(
                     chat_id=channel_id,
-                    photo=local_image_path,  # Используем локальный путь
+                    photo=absolute_image_path,
                     caption=caption,
                     parse_mode='HTML',
                     read_timeout=30,
@@ -633,60 +619,121 @@ async def process_news_item(context, rss_manager, news):
     news_id = news.get('id')
     news_link = news.get('link')
     rss_feed_id = news.get('rss_feed_id')
+    image_url = news.get('image_url')
     image_filename = None
     local_image_path = None
-    loop = asyncio.get_event_loop()
-    # 2. Готовим переводы
-    translations = await prepare_translations(
-        title=news['title'],
-        description=news['description'],
-        category=news['category'],
-        original_lang=news['lang']
-    )
+    
+    print(f"[DEBUG] process_news_item: Начало обработки новости {news_id}")
+
+    # 1. Готовим переводы
+    print(f"[DEBUG] process_news_item: Перед вызовом prepare_translations для {news_id}")
+    try:
+        translations = await prepare_translations(
+            title=news['title'],
+            description=news['description'],
+            category=news['category'],
+            original_lang=news['lang']
+        )
+        print(f"[DEBUG] process_news_item: После вызова prepare_translations для {news_id}")
+    except Exception as e:
+        print(f"[ERROR] process_news_item: Ошибка в prepare_translations для {news_id}: {e}")
+        import traceback
+        traceback.print_exc()
+        # Можно решить, продолжать ли обработку без переводов или прервать
+        # Пока продолжаем с пустым словарем переводов
+        translations = {}
+
+    # 2. Обработка изображений
+    print(f"[DEBUG] process_news_item: Перед обработкой изображений для {news_id}")
     if news_link and news_id:
-        image_url = await extract_image_from_preview(news_link)
-        if image_url:
-            local_image_path = await download_and_save_image(image_url, news_id)
+        try:
+            if image_url:
+                print(f"[DEBUG] process_news_item: Загрузка изображения по URL для {news_id}")
+                local_image_path = await download_and_save_image(image_url, news_id)
+            else:
+                print(f"[DEBUG] process_news_item: Извлечение URL изображения из превью для {news_id}")
+                image_url = await extract_image_from_preview(news_link)
+                if image_url:
+                    print(f"[DEBUG] process_news_item: Загрузка извлеченного изображения для {news_id}")
+                    local_image_path = await download_and_save_image(image_url, news_id)
+
             if local_image_path and os.path.exists(local_image_path):
-                image_filename = os.path.basename(local_image_path)
-    loop = asyncio.get_event_loop()
-    # Передаем сам объект rss_manager и все необходимые аргументы
-    success_db = await rss_manager.mark_as_published(
-        title=news['title'],
-        content=news['description'],
-        url=news['link'],
-        original_language=news['lang'],
-        translations_dict=translations,
-        category_name=news['category'],
-        image_filename=image_filename,
-        rss_feed_id=rss_feed_id
-    )
+                # Вычисляем относительный путь от IMAGES_ROOT_DIR
+                if local_image_path.startswith(IMAGES_ROOT_DIR):
+                    # Убираем базовую директорию и нормализуем путь
+                    image_filename = local_image_path[len(IMAGES_ROOT_DIR):].lstrip('/')
+                else:
+                    # fallback на случай, если путь не соответствует ожидаемой структуре
+                    image_filename = os.path.basename(local_image_path)
+                print(f"[DEBUG] process_news_item: Изображение сохранено как {image_filename} для {news_id}")
+                news['image_filename'] = image_filename
+
+        except Exception as e:
+            print(f"[ERROR] process_news_item: Ошибка при обработке изображения для {news_id}: {e}")
+            import traceback
+            traceback.print_exc()
+    print(f"[DEBUG] process_news_item: После обработки изображений для {news_id}")
+
+    print(f"[DEBUG] process_news_items - image_url: {image_url}, image_filename: {image_filename}, local_image_path = {local_image_path}")
+
+    # 3. Сохраняем в БД
+    print(f"[DEBUG] process_news_item: Перед вызовом mark_as_published для {news_id}")
+    try:
+        success_db = await rss_manager.mark_as_published(
+            title=news['title'],
+            content=news['description'],
+            url=news['link'],
+            original_language=news['lang'],
+            translations_dict=translations,
+            category_name=news['category'],
+            image_filename=image_filename,
+            rss_feed_id=rss_feed_id
+        )
+        print(f"[DEBUG] process_news_item: После вызова mark_as_published для {news_id}, результат: {success_db}")
+    except Exception as e:
+        print(f"[ERROR] process_news_item: Ошибка в mark_as_published для {news_id}: {e}")
+        import traceback
+        traceback.print_exc()
+        success_db = False
+
+    # 4. Отправляем в Telegram
     if success_db:
         print("[MAIN] Данные новости успешно обработаны и сохранены в БД.")
         # Создаем обёртки, которые используют семафор
         async def limited_post_to_channel():
-            async with SEND_SEMAPHORE:
-                await post_to_channel(context.bot, news, translations)
+            try:
+                async with SEND_SEMAPHORE:
+                    await post_to_channel(context.bot, news, translations)
+            except Exception as e:
+                print(f"[ERROR] process_news_item: Ошибка в limited_post_to_channel для {news_id}: {e}")
+                import traceback
+                traceback.print_exc()
+
         async def limited_send_personal_news():
-            async with SEND_SEMAPHORE:
-                await send_personal_news(context.bot, news, translations)
+            try:
+                async with SEND_SEMAPHORE:
+                    await send_personal_news(context.bot, news, translations)
+            except Exception as e:
+                print(f"[ERROR] process_news_item: Ошибка в limited_send_personal_news для {news_id}: {e}")
+                import traceback
+                traceback.print_exc()
+
         if news['category'] in CHANNEL_CATEGORIES:
             print(f"[LOG] Новость категории '{news['category']}' подходит для общего канала. Планируем публикацию.")
-            # asyncio.create_task(post_to_channel(context.bot, news, translations)) # <-- Закомментировано
-            asyncio.create_task(limited_post_to_channel()) # <-- Новое
+            asyncio.create_task(limited_post_to_channel())
         else:
             print(f"[LOG] Новость категории '{news['category']}' НЕ подходит для общего канала. Публикация в канал пропущена.")
         # Персональные новости отправляются всегда
-        # asyncio.create_task(send_personal_news(context.bot, news, translations)) # <-- Закомментировано
-        asyncio.create_task(limited_send_personal_news()) # <-- Новое
+        asyncio.create_task(limited_send_personal_news())
     else:
         print("[MAIN] Ошибка обработки и сохранения данных в БД. Публикация в Telegram пропущена.")
+    
+    print(f"[DEBUG] process_news_item: Завершение обработки новости {news_id}")
     return success_db
 
 async def monitor_news_task(context: ContextTypes.DEFAULT_TYPE):
     """Асинхнхронная задача мониторинга новостей"""
     print("[LOG] Запуск задачи мониторинга новостей")
-    rss_manager = RSSManager()
     try:
         news_list = await asyncio.wait_for(rss_manager.fetch_news(), timeout=120)
         print(f"[LOG] Получено {len(news_list)} новостей")
@@ -713,26 +760,43 @@ async def monitor_news_task(context: ContextTypes.DEFAULT_TYPE):
         print(f"[ERROR] Ошибка в задаче мониторинга: {e}")
 
 # --- Функции для пакетной обработки ---
-async def start_batch_processor(application: Application):
-    """Запускает пакетную обработку как фоновую задачу после инициализации бота."""
-    global batch_processor_task
+async def schedule_batch_processor(application: Application) -> None:
+    """Функция для планирования регулярной пакетной обработки"""
+    global rss_manager
+
+    if rss_manager and hasattr(rss_manager, 'dublicate_detector'):
+        job_queue = application.job_queue
+        if job_queue:
+            # Планируем задачу на выполнение каждые 30 минут (1800 секунд)
+            # first=60 означает, что первая задача запустится через 1 минуту после старта
+            job_queue.run_repeating(
+                batch_processor_job, # <-- Новая функция-обработчик задачи
+                interval=1800, # 30 минут в секундах
+                first=60, # Первая задача через 1 минуту
+                job_kwargs={'misfire_grace_time': 600} # 10 минут на выполнение с опозданием
+            )
+            print("[LOG] Зарегистрирована задача регулярной пакетной обработки (каждые 30 минут)")
+        else:
+            print("[WARN] JobQueue не доступна для планирования пакетной обработки")
+    else:
+        print("[WARN] RSSManager или DuplicateDetector не инициализированы для планирования пакетной обработки")
+
+async def batch_processor_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Функция, выполняемая по расписанию для пакетной обработки"""
+    global rss_manager
+
     try:
-        # Создаем экземпляр детектора
-        detector = FireFeedDuplicateDetector()
-        
-        # Запускаем непрерывную обработку как задачу asyncio
-        # Настройте параметры batch_size, delay_between_batches и delay_between_items по своему усмотрению
-        batch_processor_task = asyncio.create_task(
-            detector.run_batch_processor_continuously(
-                batch_size=100,              # Обрабатывать по 50 новостей за партию
-                delay_between_batches=1*60, # Ждать 1 минуту между партиями (в секундах)
-                delay_between_items=0.2      # Ждать 0.2 секунды между новостями в партии
-            ),
-            name="BatchEmbeddingProcessor" # Даем задаче имя для удобства отладки
+        print("[BATCH] Запуск регулярной пакетной обработки новостей без эмбеддингов...")
+        success, errors = await rss_manager.dublicate_detector.process_missing_embeddings_batch(
+            batch_size=50,
+            delay_between_items=0.1
         )
-        print("[LOG] [BATCH_EMBEDDING] Фоновая задача пакетной обработки запущена.")
+        print(f"[BATCH] Регулярная пакетная обработка завершена. Успешно: {success}, Ошибок: {errors}")
     except Exception as e:
-        print(f"[ERROR] [BATCH_EMBEDDING] Ошибка при запуске фоновой задачи: {e}")
+        print(f"[ERROR] Ошибка в регулярной пакетной обработке: {e}")
+        # Можно добавить логирование traceback для отладки
+        import traceback
+        traceback.print_exc()
 
 async def stop_batch_processor():
     """Останавливает фоновую задачу пакетной обработки."""
@@ -748,17 +812,50 @@ async def stop_batch_processor():
         except Exception as e:
             print(f"[ERROR] [BATCH_EMBEDDING] Ошибка при остановке задачи: {e}")
 
-# --- Функция post_stop для корректной остановки ---
 async def post_stop(application: Application) -> None:
-    """Вызывается после остановки бота для выполнения очистки."""
-    print("[LOG] [BATCH_EMBEDDING] Выполняется post_stop...")
-    await stop_batch_processor()
-    # Здесь можно добавить другую логику очистки, если нужно
-    print("[LOG] [BATCH_EMBEDDING] Post-stop завершен.")
+    """Функция, вызываемая при остановке приложения для корректного закрытия ресурсов"""
+    global rss_manager, user_manager, duplicate_detector
+    
+    print("[LOG] Остановка приложения и закрытие пулов подключений...")
+    
+    # Закрываем пул RSSManager
+    if rss_manager and hasattr(rss_manager, 'pool') and rss_manager.pool:
+        try:
+            rss_manager.pool.close()
+            await rss_manager.pool.wait_closed()
+            print("[LOG] Пул RSSManager закрыт")
+        except Exception as e:
+            print(f"[ERROR] Ошибка при закрытии пула RSSManager: {e}")
+    
+    # Закрываем пул UserManager
+    if user_manager and hasattr(user_manager, 'pool') and user_manager.pool:
+        try:
+            user_manager.pool.close()
+            await user_manager.pool.wait_closed()
+            print("[LOG] Пул UserManager закрыт")
+        except Exception as e:
+            print(f"[ERROR] Ошибка при закрытии пула UserManager: {e}")
+
+    # Закрываем пул FireFeedDuplicateDetector (классовый пул)
+    try:
+        await FireFeedDuplicateDetector.close_pool()
+        print("[LOG] Пул FireFeedDuplicateDetector закрыт")
+    except Exception as e:
+        print(f"[ERROR] Ошибка при закрытии пула FireFeedDuplicateDetector: {e}")
+    
+    print("[LOG] Все пулы подключений закрыты")
 
 def main():
+    global rss_manager, user_manager, duplicate_detector
+    
     print("[LOG] Запуск бота")
-    # rss_manager = RSSManager() # Создание здесь может быть избыточным, если он создается внутри monitor_news_task
+    
+    # Создаем один экземпляр детектора для всего приложения
+    duplicate_detector = FireFeedDuplicateDetector()
+    
+    # Передаем его в RSSManager
+    rss_manager = RSSManager(duplicate_detector=duplicate_detector)
+    user_manager = UserManager()
 
     # --- Создаем Application с post_stop ---
     application = Application.builder().token(BOT_TOKEN).post_stop(post_stop).build()
@@ -775,20 +872,18 @@ def main():
     if job_queue:
         job_queue.run_repeating(
             monitor_news_task,
-            interval=180,
+            interval=600,
             first=1,
             job_kwargs={'misfire_grace_time': 600}
         )
         print("[LOG] Зарегистрирована задача мониторинга новостей")
 
-    # --- Добавляем запуск пакетной обработки ---
-    # Планируем запуск задачи после старта приложения
-    application.post_init = start_batch_processor
+    # --- Добавляем запуск пакетной обработки эмбеддингов ---
+    application.post_init = schedule_batch_processor
 
     def signal_handler(sig, frame):
         print("[LOG] Получен сигнал завершения...")
         # Планируем остановку приложения корректно
-        # asyncio.create_task не работает вне async контекста, поэтому используем loop.call_soon
         try:
             loop = asyncio.get_running_loop()
             loop.call_soon(asyncio.create_task, application.stop())
@@ -812,11 +907,6 @@ def main():
     except Exception as e:
         print(f"[ERROR] Ошибка: {e}")
         raise
-    # finally:
-    #     # Этот блок может не выполниться напрямую при использовании run_webhook
-    #     # Лучше использовать application.post_stop для корректной очистки
-    application.post_stop
-    #     pass
 
 if __name__ == "__main__":
     main()

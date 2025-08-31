@@ -7,7 +7,8 @@ import hashlib
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse, urljoin
 from functools import partial
-
+from config import IMAGES_ROOT_DIR, IMAGE_FILE_EXTENSIONS
+from datetime import datetime
 
 def clean_html(raw_html):
     """Удаляет все HTML-теги и преобразует HTML-сущности"""
@@ -23,9 +24,10 @@ def clean_html(raw_html):
     # Удаляем лишние пробелы
     return re.sub(r'\s+', ' ', clean_text).strip()
 
-async def download_and_save_image(url, news_id, save_directory="/var/www/firefeed/data/www/firefeed.net/data/images"):
+async def download_and_save_image(url, news_id, save_directory=IMAGES_ROOT_DIR):
     """
     Скачивает изображение и сохраняет его локально с именем файла на основе news_id.
+    Сохраняет по пути: save_directory/YYYY/MM/DD/{news_id}{ext}
     
     :param url: URL изображения
     :param news_id: уникальный ID новости для БД
@@ -37,8 +39,13 @@ async def download_and_save_image(url, news_id, save_directory="/var/www/firefee
         return None
         
     try:
-        print(f"[DEBUG] Начинаем сохранять изображение из {url} в {save_directory}")
-        os.makedirs(save_directory, exist_ok=True)
+        # Используем текущее время для формирования пути
+        created_at = datetime.now()
+        date_path = created_at.strftime("%Y/%m/%d")
+        full_save_directory = os.path.join(save_directory, date_path)
+
+        print(f"[DEBUG] Начинаем сохранять изображение из {url} в {full_save_directory}")
+        os.makedirs(full_save_directory, exist_ok=True)
         
         loop = asyncio.get_event_loop()
         
@@ -59,20 +66,19 @@ async def download_and_save_image(url, news_id, save_directory="/var/www/firefee
         response.raise_for_status()
 
         content_type = response.headers.get('content-type', '').lower()
+        content_lower = content_type.lower()
         extension = '.jpg'
 
-        if 'jpeg' in content_type:
-            extension = '.jpg'
-        elif 'png' in content_type:
-            extension = '.png'
-        elif 'gif' in content_type:
-            extension = '.gif'
-        elif 'webp' in content_type:
-            extension = '.webp'
+        # Проверяем content_type
+        for ext in IMAGE_FILE_EXTENSIONS:
+            if ext[1:] in content_lower:
+                extension = ext
+                break
         else:
+            # Проверяем URL
             parsed_url = urlparse(url)
             path = parsed_url.path
-            if path.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp')):
+            if path.lower().endswith(tuple(IMAGE_FILE_EXTENSIONS)):
                 extension = os.path.splitext(path)[1].lower()
 
         safe_news_id = "".join(c for c in str(news_id) if c.isalnum() or c in ('-', '_')).rstrip()
@@ -80,7 +86,7 @@ async def download_and_save_image(url, news_id, save_directory="/var/www/firefee
             safe_news_id = hashlib.md5(url.encode()).hexdigest()
 
         filename = f"{safe_news_id}{extension}"
-        file_path = os.path.join(save_directory, filename)
+        file_path = os.path.join(full_save_directory, filename)
 
         with open(file_path, 'wb') as f:
             f.write(response.content)
@@ -92,7 +98,7 @@ async def download_and_save_image(url, news_id, save_directory="/var/www/firefee
         print(f"[WARN] Ошибка сети при скачивании изображения {url}: {e}")
         return None
     except OSError as e:
-        print(f"[WARN] Ошибка файловой системы при сохранении изображения {url} в {save_directory}: {e}")
+        print(f"[WARN] Ошибка файловой системы при сохранении изображения {url} в {full_save_directory}: {e}")
         return None
     except Exception as e:
         print(f"[WARN] Неожиданная ошибка при скачивании/сохранении изображения {url}: {e}")

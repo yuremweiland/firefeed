@@ -13,6 +13,10 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class FireFeedDuplicateDetector:
+    # Классовый пул соединений для предотвращения множественного создания
+    _db_pool = None
+    _pool_lock = asyncio.Lock()
+    
     def __init__(self, model_name: str = 'all-MiniLM-L6-v2', similarity_threshold: float = NEWS_SIMILARITY_THRESHOLD):
         """
         Инициализация асинхронного детектора дубликатов новостей
@@ -25,20 +29,24 @@ class FireFeedDuplicateDetector:
         self.similarity_threshold = similarity_threshold
         self.embedding_dim = self._get_embedding_dimension()
     
+    async def _initialize_db_pool(self):
+        """Инициализация пула соединений с базой данных (один раз для всех экземпляров)"""
+        if FireFeedDuplicateDetector._db_pool is None:
+            async with FireFeedDuplicateDetector._pool_lock:
+                if FireFeedDuplicateDetector._db_pool is None:
+                    try:
+                        FireFeedDuplicateDetector._db_pool = await aiopg.create_pool(**DB_CONFIG)
+                        logger.info("[DUBLICATE_DETECTOR] Пул соединений с БД успешно создан")
+                    except Exception as e:
+                        logger.error(f"[DUBLICATE_DETECTOR] Ошибка создания пула соединений: {e}")
+                        raise
+        return FireFeedDuplicateDetector._db_pool
+    
     def _get_embedding_dimension(self) -> int:
         """Получение размерности эмбеддинга модели"""
         sample_text = "test"
         embedding = self.model.encode(sample_text)
         return len(embedding)
-    
-    async def _get_db_pool(self):
-        """Создание пула соединений с базой данных"""
-        try:
-            pool = await aiopg.create_pool(**DB_CONFIG)
-            return pool
-        except Exception as e:
-            logger.error(f"[DUBLICATE_DETECTOR] Ошибка создания пула соединений: {e}")
-            raise
     
     def _combine_text_fields(self, title: str, content: str) -> str:
         """Комбинирование заголовка и содержания для создания эмбеддинга"""
@@ -46,9 +54,8 @@ class FireFeedDuplicateDetector:
 
     async def _get_embedding_by_id(self, news_id: str) -> Optional[List[float]]:
         """Получение существующего эмбеддинга по ID новости"""
-        pool = None
         try:
-            pool = await self._get_db_pool()
+            pool = await self._initialize_db_pool()
             async with pool.acquire() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute("""
@@ -67,10 +74,6 @@ class FireFeedDuplicateDetector:
         except Exception as e:
             logger.error(f"[DUBLICATE_DETECTOR] Ошибка при получении эмбеддинга для новости {news_id}: {e}")
             return None
-        finally:
-            if pool:
-                pool.close()
-                await pool.wait_closed()
 
     async def _is_duplicate_with_embedding(self, news_id: str, embedding: List[float]) -> Tuple[bool, Optional[Dict[str, Any]]]:
         """Проверка дубликата с уже имеющимся эмбеддингом"""
@@ -130,9 +133,8 @@ class FireFeedDuplicateDetector:
             news_id: ID новости
             embedding: Эмбеддинг новости
         """
-        pool = None
         try:
-            pool = await self._get_db_pool()
+            pool = await self._initialize_db_pool()
             async with pool.acquire() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute("""
@@ -145,10 +147,6 @@ class FireFeedDuplicateDetector:
         except Exception as e:
             logger.error(f"[DUBLICATE_DETECTOR] Ошибка при сохранении эмбеддинга для новости {news_id}: {e}")
             raise
-        finally:
-            if pool:
-                pool.close()
-                await pool.wait_closed()
     
     async def get_similar_news(self, embedding: List[float], current_news_id: str = None, limit: int = 10) -> List[Dict[str, Any]]:
         """
@@ -162,9 +160,8 @@ class FireFeedDuplicateDetector:
         Returns:
             Список похожих новостей
         """
-        pool = None
         try:
-            pool = await self._get_db_pool()
+            pool = await self._initialize_db_pool()
             async with pool.acquire() as conn:
                 async with conn.cursor() as cur:
                     if current_news_id:
@@ -192,10 +189,6 @@ class FireFeedDuplicateDetector:
         except Exception as e:
             logger.error(f"[DUBLICATE_DETECTOR] Ошибка при поиске похожих новостей: {e}")
             raise
-        finally:
-            if pool:
-                pool.close()
-                await pool.wait_closed()
     
     async def is_duplicate(self, news_id: str, title: str, content: str) -> Tuple[bool, Optional[Dict[str, Any]]]:
         """
@@ -209,7 +202,6 @@ class FireFeedDuplicateDetector:
         Returns:
             Кортеж: (является_дубликатом, информация_о_дубликате)
         """
-        pool = None
         try:
             # Генерируем эмбеддинг для новой новости
             embedding = await self.generate_embedding(title, content)
@@ -250,12 +242,6 @@ class FireFeedDuplicateDetector:
         except Exception as e:
             logger.error(f"[DUBLICATE_DETECTOR] Ошибка при проверке дубликата: {e}")
             raise
-        finally:
-            if pool: # Переменная pool не используется в этом методе напрямую, 
-                    # но если бы использовалась, здесь было бы её закрытие
-                # pool.close()
-                # await pool.wait_closed()
-                pass
     
     async def process_news(self, news_id: str, title: str, content: str) -> bool:
         """
@@ -269,7 +255,6 @@ class FireFeedDuplicateDetector:
         Returns:
             True если новость уникальна, False если дубликат
         """
-        pool = None
         try:
             # Сначала проверяем, есть ли уже эмбеддинг для этой новости
             existing_embedding = await self._get_embedding_by_id(news_id)
@@ -296,19 +281,15 @@ class FireFeedDuplicateDetector:
                     await self.save_embedding(news_id, embedding)
             
             if is_dup:
-                logger.info(f"[DUBLICATE_DETECTOR] Новость {news_id} является дубликатом новости {duplicate_info['news_id']}")
+                logger.info(f"[DUBLICATE_DETECTOR] Новость {title[:50]} является дубликатом новости {duplicate_info['news_id']}")
                 return False
             
-            logger.info(f"[DUBLICATE_DETECTOR] Новость {news_id} уникальна")
+            # logger.info(f"[DUBLICATE_DETECTOR] Новость {news_id} уникальна")
             return True
             
         except Exception as e:
             logger.error(f"[DUBLICATE_DETECTOR] Ошибка при обработке новости {news_id}: {e}")
             raise
-        finally:
-            if pool:
-                pool.close()
-                await pool.wait_closed()
 
     # --- Методы для пакетной обработки ---
     
@@ -322,10 +303,9 @@ class FireFeedDuplicateDetector:
         Returns:
             Список словарей с данными новостей (news_id, original_title, original_content).
         """
-        pool = None
         try:
             # Используем существующий метод для получения пула
-            pool = await self._get_db_pool()
+            pool = await self._initialize_db_pool()
             async with pool.acquire() as conn:
                 async with conn.cursor() as cur:
                     
@@ -352,18 +332,14 @@ class FireFeedDuplicateDetector:
         except Exception as e:
             logger.error(f"[BATCH_EMBEDDING] Ошибка при получении новостей без эмбеддингов: {e}")
             raise
-        finally:
-            # Не закрываем пул здесь, он будет закрыт вызывающим кодом
-            pass
 
-    async def process_single_news_batch(self, news_item: Dict[str, Any], pool: aiopg.Pool) -> bool:
+    async def process_single_news_batch(self, news_item: Dict[str, Any]) -> bool:
         """
         Асинхронно обрабатывает одну новость в рамках пакетной обработки:
         генерирует и сохраняет эмбеддинг.
 
         Args:
             news_item: Словарь с данными новости (news_id, original_title, original_content).
-            pool: Пул соединений aiopg для использования.
 
         Returns:
             True, если эмбеддинг успешно сохранен, False в случае ошибки.
@@ -379,17 +355,10 @@ class FireFeedDuplicateDetector:
             embedding = await self.generate_embedding(title, content)
             logger.debug(f"[BATCH_EMBEDDING] Эмбеддинг для {news_id} сгенерирован.")
 
-            # 2. Сохраняем эмбеддинг, используя переданный пул
-            async with pool.acquire() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute("""
-                        UPDATE published_news_data
-                        SET embedding = %s
-                        WHERE news_id = %s
-                    """, (embedding, news_id))
-                    # Коммит происходит автоматически в aiopg
-                    logger.info(f"[BATCH_EMBEDDING] Эмбеддинг для новости {news_id} успешно сохранен.")
-                    return True
+            # 2. Сохраняем эмбеддинг
+            await self.save_embedding(news_id, embedding)
+            logger.info(f"[BATCH_EMBEDDING] Эмбеддинг для новости {news_id} успешно сохранен.")
+            return True
                     
         except Exception as e:
             logger.error(f"[BATCH_EMBEDDING] Ошибка при обработке новости {news_id}: {e}", exc_info=True)
@@ -422,39 +391,23 @@ class FireFeedDuplicateDetector:
 
         logger.info(f"[BATCH_EMBEDDING] Найдено {len(news_without_embeddings)} новостей для обработки.")
 
-        # 2. Создаем пул соединений aiopg для асинхронных операций сохранения
-        pool = None
         success_count = 0
         error_count = 0
 
-        try:
-            pool = await self._get_db_pool()
+        # 3. Обрабатываем каждую новость в партии
+        for i, news_item in enumerate(news_without_embeddings):
+            news_id = news_item['news_id']
+            logger.debug(f"[BATCH_EMBEDDING] Обработка новости {i+1}/{len(news_without_embeddings)}: {news_id}")
+            
+            success = await self.process_single_news_batch(news_item)
+            if success:
+                success_count += 1
+            else:
+                error_count += 1
 
-            # 3. Обрабатываем каждую новость в партии
-            for i, news_item in enumerate(news_without_embeddings):
-                news_id = news_item['news_id']
-                logger.debug(f"[BATCH_EMBEDDING] Обработка новости {i+1}/{len(news_without_embeddings)}: {news_id}")
-                
-                success = await self.process_single_news_batch(news_item, pool)
-                if success:
-                    success_count += 1
-                else:
-                    error_count += 1
-
-                # Добавляем небольшую задержку между обработками новостей в партии
-                if delay_between_items > 0 and (i + 1) < len(news_without_embeddings):
-                    await asyncio.sleep(delay_between_items)
-
-        except Exception as e:
-            logger.error(f"[BATCH_EMBEDDING] Критическая ошибка в пакетной обработке: {e}", exc_info=True)
-            # Считаем все оставшиеся новости в партии как ошибки, если произошла критическая ошибка пула
-            processed_count = success_count + error_count
-            remaining_count = len(news_without_embeddings) - processed_count
-            error_count += remaining_count
-        finally:
-            if pool:
-                pool.close()
-                await pool.wait_closed()
+            # Добавляем небольшую задержку между обработками новостей в партии
+            if delay_between_items > 0 and (i + 1) < len(news_without_embeddings):
+                await asyncio.sleep(delay_between_items)
 
         logger.info(f"[BATCH_EMBEDDING] Партия обработана. Успешно: {success_count}, Ошибок: {error_count}")
         return success_count, error_count
@@ -510,3 +463,18 @@ class FireFeedDuplicateDetector:
         except Exception as e:
             logger.error(f"[BATCH_EMBEDDING] Ошибка в однократной обработке: {e}", exc_info=True)
             raise # Повторно выбрасываем исключение, чтобы вызывающая сторона могла его обработать
+
+    @classmethod
+    async def close_pool(cls):
+        """Закрытие пула соединений при завершении работы (классовый метод)"""
+        if cls._db_pool:
+            cls._db_pool.close()
+            await cls._db_pool.wait_closed()
+            cls._db_pool = None
+            logger.info("[DUBLICATE_DETECTOR] Пул соединений с БД закрыт")
+
+    async def close(self):
+        """Закрытие пула соединений при завершении работы (для совместимости)"""
+        # Пул общий для всех экземпляров, поэтому не закрываем его в отдельном экземпляре
+        # Вместо этого используйте классовый метод close_pool()
+        pass

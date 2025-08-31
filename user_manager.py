@@ -7,12 +7,22 @@ from config import DB_CONFIG
 class UserManager:
     def __init__(self):
         self.pool = None
+        self._init_lock = asyncio.Lock()  # Для предотвращения race condition при инициализации
 
     async def init_pool(self):
         """Инициализация пула соединений"""
         if self.pool is None:
-            self.pool = await aiopg.create_pool(**DB_CONFIG)
+            async with self._init_lock:  # Блокировка для предотвращения race condition
+                if self.pool is None:  # Проверка еще раз внутри блокировки
+                    self.pool = await aiopg.create_pool(**DB_CONFIG)
         return self.pool
+
+    async def close_pool(self):
+        """Закрытие пула соединений"""
+        if self.pool:
+            self.pool.close()
+            await self.pool.wait_closed()
+            self.pool = None
 
     # --- Асинхронные методы для работы с БД ---
 
@@ -52,7 +62,7 @@ class UserManager:
                             language = EXCLUDED.language
                     ''', (user_id, json.dumps(subscriptions), language))
                     
-                    await conn.commit()
+                    # В aiopg транзакции управляются автоматически, commit не нужен
                     return True
         except Exception as e:
             print(f"[DB] [UserManager] Ошибка сохранения настроек пользователя {user_id}: {e}")
@@ -70,7 +80,7 @@ class UserManager:
                         ON CONFLICT (user_id) DO UPDATE SET language = EXCLUDED.language
                     ''', (user_id, lang_code))
                     
-                    await conn.commit()
+                    # В aiopg транзакции управляются автоматически, commit не нужен
                     return True
         except Exception as e:
             print(f"[DB] [UserManager] Ошибка установки языка пользователя {user_id}: {e}")

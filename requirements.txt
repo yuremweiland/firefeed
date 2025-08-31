@@ -15,9 +15,10 @@ pydantic==2.11.7
 bs4==0.0.2
 pillow==11.3.0
 aiopg==1.4.0
-async==timeout-4.0.3
+async-timeout==4.0.3
 pgvector==0.4.1
 scikit-learn==1.7.1
 scipy==1.16.1
 sentence-transformers==5.1.0
 threadpoolctl==3.6.0
+nltk==3.9.1

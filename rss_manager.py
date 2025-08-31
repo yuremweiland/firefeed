@@ -8,18 +8,27 @@ from datetime import datetime, timezone, timedelta
 from dateutil import parser
 from config import DB_CONFIG, MAX_ENTRIES_PER_FEED, MAX_TOTAL_NEWS
 from translator import prepare_translations
-from firefeed_dublicate_detector import FireFeedDuplicateDetector
 
 class RSSManager:
-    def __init__(self):
-        self.dublicate_detector = FireFeedDuplicateDetector()
+    def __init__(self, duplicate_detector=None):
+        self.dublicate_detector = duplicate_detector
         self.pool = None
+        self._init_lock = asyncio.Lock() # Для предотвращения race condition при инициализации
 
     async def init_pool(self):
         """Инициализация пула соединений"""
         if self.pool is None:
-            self.pool = await aiopg.create_pool(**DB_CONFIG)
+            async with self._init_lock: # Блокировка для предотвращения race condition
+                if self.pool is None:  # Проверка еще раз внутри блокировки
+                    self.pool = await aiopg.create_pool(**DB_CONFIG)
         return self.pool
+
+    async def close_pool(self):
+        """Закрытие пула соединений"""
+        if self.pool:
+            self.pool.close()
+            await self.pool.wait_closed()
+            self.pool = None
 
     async def _get_all_feeds(self):
         """Вспомогательный метод: Получает список ВСЕХ RSS-лент."""
@@ -160,7 +169,6 @@ class RSSManager:
                         print(f"[DB] [RSSManager] Ошибка: Категория '{category_name}' не найдена в таблице 'categories'.")
                         return False
                     category_id = cat_result[0]
-
                     # 2. Получить ID источника по имени
                     await cur.execute("SELECT id FROM sources WHERE name = %s", (source_name,))
                     src_result = await cur.fetchone()
@@ -168,7 +176,6 @@ class RSSManager:
                         print(f"[DB] [RSSManager] Ошибка: Источник '{source_name}' не найден в таблице 'sources'.")
                         return False
                     source_id = src_result[0]
-
                     # 3. Вставить новую ленту
                     feed_name = url.split('/')[-1] or "Новая лента"
                     query = """
@@ -176,10 +183,9 @@ class RSSManager:
                         VALUES (%s, %s, %s, %s, %s, %s)
                     """
                     await cur.execute(query, (source_id, url, feed_name, category_id, language, True))
-                    await conn.commit()
+                    # В aiopg транзакции управляются автоматически, commit не нужен
                     print(f"[DB] [RSSManager] Лента '{url}' успешно добавлена.")
                     return True
-                    
         except Exception as e:
             print(f"[DB] [RSSManager] Ошибка БД при добавлении фида '{url}': {e}")
             return False
@@ -192,7 +198,6 @@ class RSSManager:
                 async with conn.cursor() as cur:
                     updates = []
                     values = []
-                    
                     # Обработка изменения категории по имени (если не None)
                     if category_name is not None:
                         await cur.execute("SELECT id FROM categories WHERE name = %s", (category_name,))
@@ -202,7 +207,6 @@ class RSSManager:
                             values.append(cat_result[0])
                         else:
                             print(f"[DB] [RSSManager] Предупреждение: Категория '{category_name}' не найдена. Поле category_id не обновлено.")
-                    
                     # Обработка изменения источника по имени (если не None)
                     if source_name is not None:
                         await cur.execute("SELECT id FROM sources WHERE name = %s", (source_name,))
@@ -212,7 +216,6 @@ class RSSManager:
                             values.append(src_result[0])
                         else:
                             print(f"[DB] [RSSManager] Предупреждение: Источник '{source_name}' не найден. Поле source_id не обновлено.")
-
                     # Обработка других полей (если не None)
                     if url is not None:
                         updates.append("url = %s")
@@ -226,15 +229,13 @@ class RSSManager:
                     if feed_name is not None:
                         updates.append("name = %s")
                         values.append(feed_name)
-
                     if not updates:
                         print("[DB] [RSSManager] Нет полей для обновления.")
                         return False
-                        
                     values.append(feed_id)
                     query = f"UPDATE rss_feeds SET {', '.join(updates)} WHERE id = %s"
                     await cur.execute(query, values)
-                    await conn.commit()
+                    # В aiopg транзакции управляются автоматически, commit не нужен
                     await cur.execute("SELECT COUNT(*) FROM rss_feeds WHERE id = %s", (feed_id,))
                     result = await cur.fetchone()
                     affected_rows = result[0] if result else 0
@@ -243,7 +244,6 @@ class RSSManager:
                     else:
                         print(f"[DB] [RSSManager] Лента с ID {feed_id} не найдена или не была изменена.")
                     return affected_rows > 0
-                    
         except Exception as e:
             print(f"[DB] [RSSManager] Ошибка БД при обновлении фида с ID {feed_id}: {e}")
             return False
@@ -256,14 +256,13 @@ class RSSManager:
                 async with conn.cursor() as cur:
                     query = "DELETE FROM rss_feeds WHERE id = %s"
                     await cur.execute(query, (feed_id,))
-                    await conn.commit()
+                    # В aiopg транзакции управляются автоматически, commit не нужен
                     affected_rows = cur.rowcount
                     if affected_rows > 0:
                         print(f"[DB] [RSSManager] Лента с ID {feed_id} успешно удалена.")
                     else:
                         print(f"[DB] [RSSManager] Лента с ID {feed_id} не найдена.")
                     return affected_rows > 0
-                    
         except Exception as e:
             print(f"[DB] [RSSManager] Ошибка БД при удалении фида с ID {feed_id}: {e}")
             return False
@@ -361,13 +360,11 @@ class RSSManager:
                         WHERE id = %s
                     """, (rss_feed_id,))
                     row = await cur.fetchone()
-                    
                     if row and row[0]:
                         cooldown_minutes = row[0]
                         # Пропорциональная формула: 1 новость за cooldown_minutes
                         # Например: 360 минут = 1 новость за 6 часов = 1/6 новостей в час
                         max_news = max(1, round(60 / cooldown_minutes))
-                        
                         # Для корректного округления при больших значениях
                         if cooldown_minutes > 60:
                             # Округляем вниз для больших интервалов
@@ -375,7 +372,6 @@ class RSSManager:
                             # Если деление дает 0, то ставим 1 (минимум одна новость за период)
                             if max_news == 0:
                                 max_news = 1
-                                
                         return max_news
                     else:
                         return 1  # По умолчанию 1 новость в час
@@ -400,11 +396,9 @@ class RSSManager:
                     """
                     await cur.execute(query, (title_hash, content_hash))
                     result = await cur.fetchone()
-                    
                     # Если результат есть (result не None), новость считается НЕ новой
                     is_duplicate = result is not None
                     return not is_duplicate # Возвращаем True, если НЕ дубликат
-                    
         except Exception as err:
             print(f"[DB] [is_news_new] Ошибка БД: {err}")
             # В случае ошибки БД лучше считать новость НЕ новой, чтобы избежать дубликатов
@@ -421,7 +415,6 @@ class RSSManager:
         news_id = f"{title_hash}_{content_hash}"
         short_id = news_id[:20] + "..." if len(news_id) > 20 else news_id
         print(f"[DB] [mark_as_published] Начало обработки для ID: {short_id}")
-
         await self.init_pool()
         try:
             async with self.pool.acquire() as conn:
@@ -436,7 +429,6 @@ class RSSManager:
                             category_id = category_result[0]
                         else:
                             print(f"[DB] [WARN] Категория '{category_name}' не найдена в таблице categories")
-
                     # --- ГАРАНТИРУЕМ существование записи в published_news ---
                     query_published_news = """
                     INSERT INTO published_news (id, title_hash, content_hash, source_url, published_at)
@@ -448,17 +440,14 @@ class RSSManager:
                     print(f"[DB] [mark_as_published] Подготовка запроса к 'published_news' (ID: {short_id})")
                     await cur.execute(query_published_news, (news_id, title_hash, content_hash, url))
                     print(f"[DB] [mark_as_published] Запрос к 'published_news' выполнен. (ID: {short_id})")
-
                     # --- УБИРАЕМ commit - пусть работает в autocommit режиме ---
                     print(f"[DB] [mark_as_published] Операция в 'published_news' выполнена. (ID: {short_id})")
                     # -------------------------------------------------------------
-
                     # 2b. Проверяем существование
                     check_query = "SELECT 1 FROM published_news WHERE id = %s LIMIT 1"
                     print(f"[DB] [mark_as_published] Выполнение проверочного SELECT (ID: {short_id})")
                     await cur.execute(check_query, (news_id,))
                     exists_in_parent = await cur.fetchone()
-                    
                     if not exists_in_parent:
                         # Критическая ошибка
                         error_msg = f"[DB] [CRITICAL] Запись в 'published_news' НЕ существует! FK constraint будет нарушено. (ID: {short_id})"
@@ -482,7 +471,6 @@ class RSSManager:
                     else:
                         print(f"[DB] [mark_as_published] Подтверждено: запись в 'published_news' существует. (ID: {short_id})")
                     # -------------------------------------------------------------
-
                     # 3. ВСТАВЛЯЕМ или ОБНОВЛЯЕМ в дочерней таблице published_news_data
                     query_published_news_data = """
                     INSERT INTO published_news_data 
@@ -508,13 +496,11 @@ class RSSManager:
                         rss_feed_id
                     ))
                     print(f"[DB] [mark_as_published] Выполнен запрос к 'published_news_data'. (ID: {short_id})")
-
                     # 4. ВСТАВЛЯЕМ или ОБНОВЛЯЕМ переводы в news_translations
                     for lang_code, trans_data in translations_dict.items():
                         if lang_code in ['ru', 'en', 'de', 'fr'] and isinstance(trans_data, dict):
                             trans_title = trans_data.get('title', title)
                             trans_content = trans_data.get('description', content)
-                            
                             query_translation = """
                             INSERT INTO news_translations (news_id, language, translated_title, translated_content, created_at, updated_at)
                             VALUES (%s, %s, %s, %s, NOW(), NOW())
@@ -524,13 +510,10 @@ class RSSManager:
                                 updated_at = NOW()
                             """
                             await cur.execute(query_translation, (news_id, lang_code, trans_title, trans_content))
-                    
                     # УБИРАЕМ commit - все операции выполняются по отдельности
                     print(f"[DB] [SUCCESS] Новость и переводы сохранены: {short_id}")
                     print(f"[DB] [mark_as_published] Обработка переводов завершена. (ID: {short_id})")
-                    
                     return True # <-- Возвращаем True при успехе
-                    
         except Exception as err:
             print(f"[DB] [ERROR] Ошибка БД при сохранении (ID: {short_id}): {err}")
             import traceback
@@ -596,71 +579,59 @@ class RSSManager:
         Перед парсингом проверяет cooldown и лимиты.
         """
         local_news = []
-
         rss_feed_id = feed_info['id']
-
         # Получаем параметры ленты
         cooldown_minutes = await self.get_feed_cooldown_minutes(rss_feed_id)
         max_news_per_hour = await self.get_max_news_per_hour_for_feed(rss_feed_id)
         recent_count = await self.get_recent_news_count_for_feed(rss_feed_id, cooldown_minutes)
-
         # Проверка лимита новостей за период кулдауна
         if recent_count >= max_news_per_hour:
             print(f"[SKIP] Лента ID {rss_feed_id} достигла лимита {max_news_per_hour} новостей за {cooldown_minutes} минут. Опубликовано: {recent_count}")
             return local_news
-
         # Проверка кулдауна (время последней публикации)
         last_published = await self.get_last_published_time_for_feed(rss_feed_id)
-
         if last_published:
             elapsed = datetime.now(timezone.utc) - last_published
             if elapsed < timedelta(minutes=cooldown_minutes):
                 print(f"[SKIP] Лента ID {rss_feed_id} находится на кулдауне ({cooldown_minutes} мин). Прошло: {elapsed}")
                 return local_news
-
         # Если лента прошла все проверки — парсим её
         try:
             print(f"[RSS] Парсинг ленты: {feed_info['name']} ({feed_info['url']})")
             feed = feedparser.parse(feed_info['url'], request_headers=headers)
-
             # Логируем ошибки парсинга
             if getattr(feed, 'bozo', 0):
                 exc = getattr(feed, 'bozo_exception', None)
                 if exc:
                     error_type = type(exc).__name__
                     print(f"[RSS] Ошибка парсинга ({error_type}) в {feed_info['url']}: {str(exc)[:200]}")
-
             if not feed.entries:
                 print(f"[RSS] Нет записей в {feed_info['url']}")
                 return local_news
-
             for entry in feed.entries[:MAX_ENTRIES_PER_FEED]:
                 title = getattr(entry, 'title', 'Untitled').strip()
                 description = entry.get('description', '')
-
                 if title == description:
                     continue
-
                 normalized_title = re.sub(r'\s+', ' ', title).lower()
                 unique_key = (feed_info['source'], feed_info['category'], normalized_title)
-
                 if unique_key in seen_keys:
                     continue
                 seen_keys.add(unique_key)
-
                 entry_link = entry.get('link', '#')
+
+                # Извлечение изображения
+                image_url = self.extract_image_from_rss_item(entry)
 
                 # Проверяем уникальность через БД (хэши)
                 title_hash = hashlib.sha256(title.encode('utf-8')).hexdigest()
                 content_hash = hashlib.sha256(description.encode('utf-8')).hexdigest()
-
                 is_new = await self.is_news_new(title_hash, content_hash, entry_link)
                 is_unique = await self.dublicate_detector.process_news(
-                    news_id = f"{title_hash}_{content_hash}",
-                    title = title,
-                    content = description
+                    news_id=f"{title_hash}_{content_hash}",
+                    title=title,
+                    content=description
                 )
-
                 if not is_new or not is_unique:
                     continue
 
@@ -685,15 +656,13 @@ class RSSManager:
                     'category': feed_info['category'],
                     'lang': feed_info['lang'],
                     'source': feed_info['source'],
+                    'image_url': image_url
                 }
-
                 local_news.append(news_item)
-
         except Exception as e:
             print(f"[RSS] Ошибка при обработке ленты {feed_info['url']}: {e}")
             import traceback
             traceback.print_exc()
-
         return local_news
 
     async def fetch_news(self):
@@ -703,26 +672,21 @@ class RSSManager:
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
         }
-
         try:
             active_feeds = await self.get_all_active_feeds()
             print(f"[RSS] Найдено {len(active_feeds)} активных RSS-лент.")
-
             # Создаём задачи по обработке всех активных лент
             tasks = [
                 self.fetch_single_feed(feed_info, seen_keys, headers)
                 for feed_info in active_feeds
             ]
-
             # Выполняем все задачи одновременно
             results = await asyncio.gather(*tasks, return_exceptions=True)
-
             # Обрабатываем результаты
             for i, result in enumerate(results):
                 feed_info = active_feeds[i] if i < len(active_feeds) else None
                 feed_url = feed_info['url'] if feed_info else "Unknown Feed"
                 feed_id = feed_info['id'] if feed_info else None
-
                 if isinstance(result, Exception):
                     print(f"[RSS] [ERROR] Исключение при парсинге {feed_url}: {result}")
                 elif isinstance(result, list):
@@ -732,14 +696,215 @@ class RSSManager:
                     all_news.extend(result)
                 else:
                     print(f"[RSS] [WARN] Неожиданный тип результата для {feed_url}: {type(result)}")
-
         except Exception as e:
             import traceback
             print(f"❌ Критическая ошибка в fetch_news: {e}")
             traceback.print_exc()
-
         # Сортировка и ограничение количества новостей
         sorted_news = sorted(all_news, key=lambda x: x['published'], reverse=True)
         final_news = sorted_news[:MAX_TOTAL_NEWS]
         print(f"[RSS] Всего собрано уникальных новостей: {len(final_news)}")
         return final_news
+
+    def extract_image_from_rss_item(self, item):
+        """
+        Извлекает URL изображения из элемента RSS item.
+        Приоритет: enclosure -> media:content -> media:thumbnail -> rbc_news:image
+        """
+        try:
+            # 1. enclosure с типом image/*
+            enclosures = item.get('enclosures', [])
+            for enc in enclosures:
+                if enc.get('type', '').startswith('image/'):
+                    url = enc.get('href') or enc.get('url')
+                    if url:
+                        print(f"[INFO] Найдено изображение в enclosure: {url}")
+                        return url
+            # 2. enclosure с расширением файла
+            for enc in enclosures:
+                url = enc.get('href') or enc.get('url')
+                if url and re.search(r'\.(jpe?g|png|gif|webp)(\?.*)?$', url, re.IGNORECASE):
+                    print(f"[INFO] Найдено изображение в enclosure (по расширению): {url}")
+                    return url
+            # 3. media:content
+            media_content = item.get('media_content') or item.get('media:content')
+            if media_content:
+                if isinstance(media_content, list):
+                    for media in media_content:
+                        if isinstance(media, dict) and media.get('medium') == 'image':
+                            media_url = media.get('url')
+                            if media_url:
+                                print(f"[INFO] Найдено изображение в media:content (list): {media_url}")
+                                return media_url
+                elif isinstance(media_content, dict) and media_content.get('medium') == 'image':
+                    media_url = media_content.get('url')
+                    if media_url:
+                        print(f"[INFO] Найдено изображение в media:content (dict): {media_url}")
+                        return media_url
+            # 4. media:thumbnail
+            media_thumbnail = item.get('media_thumbnail') or item.get('media:thumbnail')
+            if media_thumbnail:
+                if isinstance(media_thumbnail, list) and len(media_thumbnail) > 0:
+                    thumb = media_thumbnail[0]
+                    if isinstance(thumb, dict):
+                        thumb_url = thumb.get('url')
+                        if thumb_url:
+                            print(f"[INFO] Найдено изображение в media:thumbnail (list): {thumb_url}")
+                            return thumb_url
+                elif isinstance(media_thumbnail, dict):
+                    thumb_url = media_thumbnail.get('url')
+                    if thumb_url:
+                        print(f"[INFO] Найдено изображение в media:thumbnail (dict): {thumb_url}")
+                        return thumb_url
+            # 5. rbc_news:image (проверяем оба возможных формата ключа)
+            rbc_image_data = item.get('rbc_news_image') or item.get('rbc_news:image')
+            if isinstance(rbc_image_data, dict):
+                image_url = rbc_image_data.get('rbc_news_url') or rbc_image_data.get('url')
+                if image_url:
+                    print(f"[INFO] Найдено изображение в rbc_news:image (dict): {image_url}")
+                    return image_url.strip()
+            elif isinstance(rbc_image_data, list) and len(rbc_image_data) > 0:
+                first_image = rbc_image_data[0]
+                if isinstance(first_image, dict):
+                    image_url = first_image.get('rbc_news_url') or first_image.get('url')
+                    if image_url:
+                        print(f"[INFO] Найдено изображение в rbc_news:image (list): {image_url}")
+                        return image_url.strip()
+            print("[INFO] Изображение не найдено в RSS item.")
+            return None
+        except Exception as e:
+            print(f"[WARN] Ошибка при извлечении изображения из RSS item: {e}")
+            return None
+
+    def extract_video_from_rss_item(self, item):
+        """
+        Извлекает URL видео из элемента RSS item с учетом ограничений размера Telegram.
+        Приоритет: enclosure -> media:content
+        """
+        # Дефолтные ограничения Telegram для ботов
+        TELEGRAM_VIDEO_LIMIT = 50 * 1024 * 1024  # 50 MB
+        try:
+            # 1. enclosure с типом video/* и проверкой размера
+            enclosures = item.get('enclosures', [])
+            for enc in enclosures:
+                if enc.get('type', '').startswith('video/'):
+                    url = enc.get('href') or enc.get('url')
+                    if url:
+                        # Проверяем размер, если доступен
+                        length = enc.get('length')
+                        size_ok = True
+                        if length is not None:
+                            try:
+                                length = int(length)
+                                if length > TELEGRAM_VIDEO_LIMIT:
+                                    print(f"[INFO] Видео превышает лимит размера Telegram ({length} > {TELEGRAM_VIDEO_LIMIT}): {url}")
+                                    size_ok = False
+                            except (ValueError, TypeError):
+                                pass  # Не удалось преобразовать размер
+                        if size_ok:
+                            print(f"[INFO] Найдено видео в enclosure: {url}")
+                            return url
+            # 2. enclosure с расширением видео файла и проверкой размера
+            for enc in enclosures:
+                url = enc.get('href') or enc.get('url')
+                if url and re.search(r'\.(mp4|avi|mov|wmv|flv|webm|mkv)(\?.*)?$', url, re.IGNORECASE):
+                    # Проверяем размер, если доступен
+                    length = enc.get('length')
+                    size_ok = True
+                    if length is not None:
+                        try:
+                            length = int(length)
+                            if length > TELEGRAM_VIDEO_LIMIT:
+                                print(f"[INFO] Видео превышает лимит размера Telegram ({length} > {TELEGRAM_VIDEO_LIMIT}): {url}")
+                                size_ok = False
+                        except (ValueError, TypeError):
+                            pass  # Не удалось преобразовать размер
+                    if size_ok:
+                        print(f"[INFO] Найдено видео в enclosure (по расширению): {url}")
+                        return url
+            # 3. media:content с типом video и проверкой размера
+            media_content = item.get('media_content') or item.get('media:content')
+            if media_content:
+                if isinstance(media_content, list):
+                    for media in media_content:
+                        if isinstance(media, dict) and media.get('medium') == 'video':
+                            media_url = media.get('url')
+                            if media_url:
+                                # Проверяем размер, если доступен
+                                file_size = media.get('fileSize') or media.get('filesize')
+                                size_ok = True
+                                if file_size is not None:
+                                    try:
+                                        file_size = int(file_size)
+                                        if file_size > TELEGRAM_VIDEO_LIMIT:
+                                            print(f"[INFO] Видео превышает лимит размера Telegram ({file_size} > {TELEGRAM_VIDEO_LIMIT}): {media_url}")
+                                            size_ok = False
+                                    except (ValueError, TypeError):
+                                        pass  # Не удалось преобразовать размер
+                                if size_ok:
+                                    print(f"[INFO] Найдено видео в media:content (list): {media_url}")
+                                    return media_url
+                elif isinstance(media_content, dict) and media_content.get('medium') == 'video':
+                    media_url = media_content.get('url')
+                    if media_url:
+                        # Проверяем размер, если доступен
+                        file_size = media_content.get('fileSize') or media_content.get('filesize')
+                        size_ok = True
+                        if file_size is not None:
+                            try:
+                                file_size = int(file_size)
+                                if file_size > TELEGRAM_VIDEO_LIMIT:
+                                    print(f"[INFO] Видео превышает лимит размера Telegram ({file_size} > {TELEGRAM_VIDEO_LIMIT}): {media_url}")
+                                    size_ok = False
+                            except (ValueError, TypeError):
+                                pass  # Не удалось преобразовать размер
+                        if size_ok:
+                            print(f"[INFO] Найдено видео в media:content (dict): {media_url}")
+                            return media_url
+            # 4. media:content с типом video/* в атрибуте type и проверкой размера
+            if media_content:
+                if isinstance(media_content, list):
+                    for media in media_content:
+                        if isinstance(media, dict):
+                            content_type = media.get('type', '')
+                            if content_type.startswith('video/'):
+                                media_url = media.get('url')
+                                if media_url:
+                                    # Проверяем размер, если доступен
+                                    file_size = media.get('fileSize') or media.get('filesize')
+                                    size_ok = True
+                                    if file_size is not None:
+                                        try:
+                                            file_size = int(file_size)
+                                            if file_size > TELEGRAM_VIDEO_LIMIT:
+                                                print(f"[INFO] Видео превышает лимит размера Telegram ({file_size} > {TELEGRAM_VIDEO_LIMIT}): {media_url}")
+                                                size_ok = False
+                                        except (ValueError, TypeError):
+                                            pass  # Не удалось преобразовать размер
+                                    if size_ok:
+                                        print(f"[INFO] Найдено видео в media:content по типу: {media_url}")
+                                        return media_url
+                elif isinstance(media_content, dict):
+                    content_type = media_content.get('type', '')
+                    if content_type.startswith('video/'):
+                        media_url = media_content.get('url')
+                        if media_url:
+                            # Проверяем размер, если доступен
+                            file_size = media_content.get('fileSize') or media_content.get('filesize')
+                            size_ok = True
+                            if file_size is not None:
+                                try:
+                                    file_size = int(file_size)
+                                    if file_size > TELEGRAM_VIDEO_LIMIT:
+                                        print(f"[INFO] Видео превышает лимит размера Telegram ({file_size} > {TELEGRAM_VIDEO_LIMIT}): {media_url}")
+                                        size_ok = False
+                                except (ValueError, TypeError):
+                                    pass  # Не удалось преобразовать размер
+                            if size_ok:
+                                print(f"[INFO] Найдено видео в media:content по типу: {media_url}")
+                                return media_url
+            print("[INFO] Видео не найдено в RSS item или все видео превышают лимит размера Telegram.")
+            return None
+        except Exception as e:
+            print(f"[WARN] Ошибка при извлечении видео из RSS item: {e}")
+            return None
