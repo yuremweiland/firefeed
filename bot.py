@@ -1,245 +1,312 @@
 import os
+import sys
 import asyncio
-import threading
+import time
+import aiohttp
+import re
+import html
+import logging
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
-from telegram.error import NetworkError, BadRequest, TelegramError
+from telegram.error import NetworkError, BadRequest, TelegramError, RetryAfter
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes, MessageHandler, filters
-from config import WEBHOOK_CONFIG, BOT_TOKEN, CHANNEL_IDS, CHANNEL_CATEGORIES, IMAGES_ROOT_DIR
+from config import WEBHOOK_CONFIG, BOT_TOKEN, CHANNEL_IDS, CHANNEL_CATEGORIES, IMAGES_ROOT_DIR, get_shared_db_pool
 from user_manager import UserManager
 from tenacity import retry, stop_after_attempt, wait_exponential
-from rss_manager import RSSManager
-from firefeed_utils import clean_html, download_and_save_image, extract_image_from_preview
 from firefeed_translations import get_message, LANG_NAMES, TRANSLATED_FROM_LABELS, READ_MORE_LABELS
-from firefeed_dublicate_detector import FireFeedDuplicateDetector
-from firefeed_translator import FireFeedTranslator
-from firefeed_translator_task_queue import FireFeedTranslatorTaskQueue
+from dataclasses import dataclass
+from typing import Dict, Any, Optional
 
+# Настройка логирования
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+# --- Конфигурация API ---
+API_BASE_URL = "http://localhost:8000/api"
+
+# --- Глобальные переменные ---
 USER_STATES = {}
 USER_CURRENT_MENUS = {}
-# Храним язык пользователя в памяти для быстрого доступа
 USER_LANGUAGES = {}
 SEND_SEMAPHORE = asyncio.Semaphore(5)
-# --- Переменная для хранения задачи пакетной обработки ---
-batch_processor_task = None
+NEWS_PROCESSING_SEMAPHORE = asyncio.Semaphore(10)
 
-# Глобальные переменные для менеджеров
-rss_manager = None
 user_manager = None
-duplicate_detector = None
-translator = None
-translator_queue = None
+http_session = None  # Глобальная сессия для HTTP-запросов
 
-# Создаем клавиатуру меню
+@dataclass
+class PreparedNewsItem:
+    """Структура для хранения подготовленной новости."""
+    original_data: Dict[str, Any]
+    translations: Dict[str, Dict[str, str]]
+    image_filename: Optional[str]
+
+# --- Функции для работы с БД ---
+async def mark_news_as_published(news_id: str):
+    """Помечает новость как опубликованную в Telegram, устанавливая текущую дату в telegram_published_at."""
+    try:
+        # Получаем общий пул подключений
+        db_pool = await get_shared_db_pool()
+        async with db_pool.acquire() as connection:
+            async with connection.cursor() as cursor:
+                query = """
+                    UPDATE published_news_data 
+                    SET telegram_published_at = NOW() 
+                    WHERE news_id = %s
+                """
+                await cursor.execute(query, (news_id,))
+                updated_rows = cursor.rowcount
+                if updated_rows > 0:
+                    logger.info(f"Новость {news_id} помечена как опубликованная в Telegram")
+                    return True
+                else:
+                    logger.warning(f"Не удалось пометить новость {news_id} как опубликованную (запись не найдена)")
+                    return False
+    except Exception as e:
+        logger.error(f"Ошибка при пометке новости {news_id} как опубликованной: {e}")
+        return False
+
+# --- Функции для работы с API ---
+async def api_get(endpoint: str, params: dict = None) -> dict:
+    """Выполняет GET-запрос к API."""
+    global http_session
+    if http_session is None:
+        raise RuntimeError("HTTP session not initialized")
+    
+    url = f"{API_BASE_URL}{endpoint}"
+    try:
+        # Преобразуем boolean параметры в строки
+        if params:
+            processed_params = {}
+            for key, value in params.items():
+                if isinstance(value, bool):
+                    processed_params[key] = str(value).lower()
+                else:
+                    processed_params[key] = value
+        else:
+            processed_params = params
+            
+        timeout = aiohttp.ClientTimeout(total=30)  # Таймаут 30 секунд
+        async with http_session.get(url, params=processed_params, timeout=timeout) as response:
+            if response.status == 200:
+                return await response.json()
+            else:
+                logger.error(f"{endpoint} returned status {response.status}")
+                # Попытка получить текст ошибки для лучшего понимания проблемы
+                error_text = await response.text()
+                logger.error(f"Error response body: {error_text}")
+                return {}
+    except asyncio.TimeoutError:
+        logger.error(f"Timeout error calling {endpoint}")
+        return {}
+    except Exception as e:
+        logger.error(f"Failed to call {endpoint}: {e}")
+        return {}
+
+async def get_news_list(display_language: str, **filters) -> dict:
+    """Получает список новостей."""
+    params = {"display_language": display_language, **filters}
+    return await api_get("/news/", params)
+
+async def get_news_by_id(news_id: str, display_language: str = "en") -> dict:
+    """Получает новость по ID."""
+    params = {"display_language": display_language}
+    return await api_get(f"/news/{news_id}", params)
+
+async def get_categories() -> list:
+    """Получает список категорий."""
+    result = await api_get("/categories/")
+    return result.get("results", [])
+
+async def get_sources() -> list:
+    """Получает список источников."""
+    result = await api_get("/sources/")
+    return result.get("results", [])
+
+async def get_languages() -> list:
+    """Получает список языков."""
+    result = await api_get("/languages/")
+    return result.get("results", [])
+
+# --- Функции UI ---
 def get_main_menu_keyboard(lang="en"):
-    print(f"[LOG] Создание главного меню для языка: {lang}")
-    keyboard = ReplyKeyboardMarkup(
+    """Создает клавиатуру главного меню."""
+    return ReplyKeyboardMarkup(
         [
-            [
-                KeyboardButton(get_message("menu_settings", lang)), 
-                KeyboardButton(get_message("menu_help", lang))
-            ],
-            [
-                KeyboardButton(get_message("menu_status", lang)), 
-                KeyboardButton(get_message("menu_language", lang))
-            ]
+            [KeyboardButton(get_message("menu_settings", lang)), KeyboardButton(get_message("menu_help", lang))],
+            [KeyboardButton(get_message("menu_status", lang)), KeyboardButton(get_message("menu_language", lang))]
         ],
         resize_keyboard=True,
         input_field_placeholder=get_message("menu_placeholder", lang)
     )
-    return keyboard
-# Улучшенная функция установки языка пользователя
-async def set_current_user_language(user_id, lang):
-    user_manager = UserManager()
-    """Устанавливает язык пользователя в БД и в памяти"""
-    print(f"[LOG] Установка языка пользователя {user_id} на {lang}")
+
+async def set_current_user_language(user_id: int, lang: str):
+    """Устанавливает язык пользователя в БД и в памяти."""
+    global user_manager
     try:
-        # Сохраняем в БД
         await user_manager.set_user_language(user_id, lang)
-        print(f"[LOG] Язык {lang} сохранен в БД для пользователя {user_id}")
-        # Сохраняем в памяти
         USER_LANGUAGES[user_id] = lang
-        print(f"[LOG] Язык {lang} сохранен в памяти для пользователя {user_id}")
     except Exception as e:
-        print(f"[ERROR] Ошибка установки языка для {user_id}: {e}")
-# Улучшенная функция получения языка пользователя
-async def get_current_user_language(user_id):
-    user_manager = UserManager()
-    """Получает актуальный язык пользователя из памяти или БД"""
-    # Сначала проверяем в памяти
+        logger.error(f"Ошибка установки языка для {user_id}: {e}")
+
+async def get_current_user_language(user_id: int) -> str:
+    """Получает актуальный язык пользователя из памяти или БД."""
     if user_id in USER_LANGUAGES:
-        lang = USER_LANGUAGES[user_id]
-        print(f"[LOG] Получен язык пользователя {user_id} из памяти: {lang}")
-        return lang
-    # Если нет в памяти, получаем из БД
+        return USER_LANGUAGES[user_id]
     try:
         lang = await user_manager.get_user_language(user_id)
-        print(f"[LOG] Получен язык пользователя {user_id} из БД: {lang}")
         if lang:
-            # Сохраняем в памяти для быстрого доступа
             USER_LANGUAGES[user_id] = lang
         return lang or "en"
     except Exception as e:
-        print(f"[ERROR] Ошибка получения языка для {user_id}: {e}")
+        logger.error(f"Ошибка получения языка для {user_id}: {e}")
         return "en"
 
+# --- Обработчики команд ---
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print(f"[LOG] Вызов команды /start от пользователя {update.effective_user.id}")
+    """Обработчик команды /start."""
     user = update.effective_user
     user_id = user.id
     lang = await get_current_user_language(user_id)
-    print(f"[LOG] Язык пользователя {user_id}: {lang}")
     welcome_text = get_message("welcome", lang, user_name=user.first_name)
-    print(f"[LOG] Отправка приветственного сообщения пользователю {user_id}")
     await update.message.reply_text(welcome_text, reply_markup=get_main_menu_keyboard(lang))
     USER_CURRENT_MENUS[user_id] = "main"
-    print(f"[LOG] Установлено текущее меню для {user_id}: main")
 
 async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print(f"[LOG] Вызов команды /settings от пользователя {update.effective_user.id}")
+    """Обработчик команды /settings."""
+    global user_manager
+    user_id = update.effective_user.id
     try:
-        user_manager = UserManager()
-        user_id = update.effective_user.id
         lang = await get_current_user_language(user_id)
-        print(f"[LOG] Язык пользователя {user_id}: {lang}")
         settings = await user_manager.get_user_settings(user_id)
-        print(f"[LOG] Настройки пользователя {user_id}: {settings}")
         USER_STATES[user_id] = {
             "current_subs": settings["subscriptions"].copy(),
             "language": settings["language"]
         }
-        print(f"[LOG] Сохранено состояние для {user_id}: {USER_STATES[user_id]}")
-        await show_settings_menu(update, context, user_id)
+        await _show_settings_menu(update, context, user_id)
         USER_CURRENT_MENUS[user_id] = "settings"
-        print(f"[LOG] Установлено текущее меню для {user_id}: settings")
     except Exception as e:
-        print(f"[ERROR] Ошибка команды /settings для {update.effective_user.id}: {e}")
-        lang = await get_current_user_language(update.effective_user.id)
+        logger.error(f"Ошибка команды /settings для {user_id}: {e}")
+        lang = await get_current_user_language(user_id)
         await update.message.reply_text(get_message("settings_error", lang))
 
-async def show_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
-    print(f"[LOG] Отображение меню настроек для пользователя {user_id}")
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /help."""
+    user_id = update.effective_user.id
+    lang = await get_current_user_language(user_id)
+    help_text = get_message("help_text", lang)
+    await update.message.reply_text(help_text, parse_mode='HTML', reply_markup=get_main_menu_keyboard(lang))
+    USER_CURRENT_MENUS[user_id] = "main"
+
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /status."""
+    global user_manager
+    user_id = update.effective_user.id
+    lang = await get_current_user_language(user_id)
+    settings = await user_manager.get_user_settings(user_id)
+    categories = settings["subscriptions"]
+    categories_text = ", ".join(categories) if categories else get_message("no_subscriptions", lang)
+    status_text = get_message("status_text", lang,
+                             language=LANG_NAMES.get(settings["language"], "English"),
+                             categories=categories_text)
+    await update.message.reply_text(status_text, parse_mode='HTML', reply_markup=get_main_menu_keyboard(lang))
+    USER_CURRENT_MENUS[user_id] = "main"
+
+async def change_language_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды смены языка."""
+    user_id = update.effective_user.id
+    lang = await get_current_user_language(user_id)
+    keyboard = [
+        [InlineKeyboardButton("🇬🇧 English", callback_data="lang_en")],
+        [InlineKeyboardButton("🇷🇺 Русский", callback_data="lang_ru")],
+        [InlineKeyboardButton("🇩🇪 Deutsch", callback_data="lang_de")],
+        [InlineKeyboardButton("🇫🇷 Français", callback_data="lang_fr")]
+    ]
+    await update.message.reply_text(
+        get_message("language_select", lang),
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    USER_CURRENT_MENUS[user_id] = "language"
+
+# --- Вспомогательные функции UI ---
+async def _show_settings_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
+    """Отображает меню настроек."""
+    state = USER_STATES.get(user_id)
+    if not state: return
+    current_subs = state["current_subs"]
+    current_lang = state["language"]
     try:
-        state = USER_STATES.get(user_id)
-        if not state:
-            print(f"[LOG] Нет состояния для пользователя {user_id}")
-            return
-        current_subs = state["current_subs"]
-        current_lang = state["language"]
-        print(f"[LOG] Текущие подписки {user_id}: {current_subs}")
-        print(f"[LOG] Текущий язык {user_id}: {current_lang}")
+        categories = await get_categories()
         keyboard = []
-        categories = await rss_manager.get_categories()
-        print(f"[LOG] Доступные категории: {categories}")
         for category in categories:
             is_selected = category in current_subs
             text = f"{'✅ ' if is_selected else '🔲 '}{category.capitalize()}"
-            print(f"[LOG] Категория {category}, выбрана: {is_selected}")
             keyboard.append([InlineKeyboardButton(text, callback_data=f"toggle_{category}")])
         keyboard.append([InlineKeyboardButton(get_message("save_button", current_lang), callback_data="save_settings")])
         reply_markup = InlineKeyboardMarkup(keyboard)
-        print(f"[LOG] Создана клавиатура настроек для {user_id}")
         await update.message.reply_text(
             get_message("settings_title", current_lang),
             reply_markup=reply_markup
         )
-        print(f"[LOG] Отправлено меню настроек пользователю {user_id}")
     except Exception as e:
-        print(f"[ERROR] Ошибка в show_settings_menu для {user_id}: {e}")
+        logger.error(f"Ошибка в _show_settings_menu для {user_id}: {e}")
 
+async def _show_settings_menu_from_callback(query, context, user_id: int):
+    """Отображает меню настроек из callback."""
+    await _show_settings_menu(context.bot, context, user_id)
+
+# --- Обработчики callback и сообщений ---
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_manager = UserManager()
+    """Обработчик callback кнопок."""
+    global user_manager
     query = update.callback_query
-    print(f"[LOG] Получен callback от пользователя {query.from_user.id}: {query.data}")
     await query.answer()
     user_id = query.from_user.id
     try:
         if user_id not in USER_STATES:
-            print(f"[LOG] Создание нового состояния для пользователя {user_id}")
             USER_STATES[user_id] = {
-                "current_subs": user_manager.get_user_subscriptions(user_id) or [],
+                "current_subs": (await user_manager.get_user_subscriptions(user_id)) or [],
                 "language": await get_current_user_language(user_id)
             }
-            print(f"[LOG] Новое состояние для {user_id}: {USER_STATES[user_id]}")
         state = USER_STATES[user_id]
         current_lang = state["language"]
-        print(f"[LOG] Текущий язык для {user_id}: {current_lang}")
         if query.data.startswith("toggle_"):
-            print(f"[LOG] Обработка переключения категории для {user_id}")
-            category = query.data.split("_")[1]
+            category = query.data.split("_", 1)[1]
             current_subs = state['current_subs']
-            print(f"[LOG] Переключение категории {category} для {user_id}")
-            print(f"[LOG] Текущие подписки до: {current_subs}")
             if category in current_subs:
                 current_subs.remove(category)
-                print(f"[LOG] Категория {category} удалена из подписок")
             else:
                 current_subs.append(category)
-                print(f"[LOG] Категория {category} добавлена в подписки")
             state["current_subs"] = current_subs
-            print(f"[LOG] Текущие подписки после: {current_subs}")
             try:
-                print(f"[LOG] Удаление старого сообщения настроек для {user_id}")
                 await query.message.delete()
-            except Exception as delete_error:
-                print(f"[ERROR] Ошибка удаления сообщения для {user_id}: {delete_error}")
-            print(f"[LOG] Отображение обновленного меню настроек для {user_id}")
-            await show_settings_menu_from_callback(query, context, user_id)
+            except Exception:
+                pass
+            await _show_settings_menu_from_callback(query, context, user_id)
         elif query.data == "save_settings":
-            print(f"[LOG] Сохранение настроек для пользователя {user_id}")
-            print(f"[LOG] Сохраняемые данные: подписки={state['current_subs']}, язык={state['language']}")
-            await user_manager.save_user_settings(
-                user_id,
-                state["current_subs"],
-                state["language"]
-            )
-            print(f"[LOG] Настройки сохранены для {user_id}")
-            if user_id in USER_STATES:
-                del USER_STATES[user_id]
-                print(f"[LOG] Состояние удалено для {user_id}")
+            await user_manager.save_user_settings(user_id, state["current_subs"], state["language"])
+            USER_STATES.pop(user_id, None)
             try:
-                print(f"[LOG] Удаление сообщения настроек для {user_id}")
                 await query.message.delete()
-            except Exception as delete_error:
-                print(f"[ERROR] Ошибка удаления сообщения настроек для {user_id}: {delete_error}")
+            except Exception:
+                pass
             user = await context.bot.get_chat(user_id)
             welcome_text = get_message("settings_saved", current_lang) + "\n" + get_message("welcome", current_lang, user_name=user.first_name)
-            print(f"[LOG] Отправка подтверждения сохранения и главного меню для {user_id}")
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=welcome_text,
-                reply_markup=get_main_menu_keyboard(current_lang)
-            )
+            await context.bot.send_message(chat_id=user_id, text=welcome_text, reply_markup=get_main_menu_keyboard(current_lang))
             USER_CURRENT_MENUS[user_id] = "main"
-            print(f"[LOG] Установлено текущее меню для {user_id}: main")
         elif query.data.startswith("lang_"):
-            print(f"[LOG] Обработка выбора языка для {user_id}")
-            lang = query.data.split("_")[1]
-            print(f"[LOG] Выбранный язык: {lang}")
-            # Используем улучшенную функцию установки языка
+            lang = query.data.split("_", 1)[1]
             await set_current_user_language(user_id, lang)
-            print(f"[LOG] Язык сохранен для {user_id}: {lang}")
             if user_id in USER_STATES:
-                state = USER_STATES[user_id]
-                state["language"] = lang
-                print(f"[LOG] Язык обновлен в состоянии для {user_id}: {lang}")
+                USER_STATES[user_id]["language"] = lang
             try:
-                print(f"[LOG] Удаление сообщения выбора языка для {user_id}")
                 await query.message.delete()
-            except Exception as delete_error:
-                print(f"[ERROR] Ошибка удаления сообщения выбора языка для {user_id}: {delete_error}")
+            except Exception:
+                pass
             user = await context.bot.get_chat(user_id)
             welcome_text = get_message("language_changed", lang, language=LANG_NAMES.get(lang, "English")) + "\n" + get_message("welcome", lang, user_name=user.first_name)
-            print(f"[LOG] Отправка подтверждения смены языка и главного меню для {user_id}")
-            await context.bot.send_message(
-                chat_id=user_id,
-                text=welcome_text,
-                reply_markup=get_main_menu_keyboard(lang)
-            )
+            await context.bot.send_message(chat_id=user_id, text=welcome_text, reply_markup=get_main_menu_keyboard(lang))
             USER_CURRENT_MENUS[user_id] = "main"
-            print(f"[LOG] Установлено текущее меню для {user_id}: main")
         elif query.data == "change_lang":
-            print(f"[LOG] Обработка запроса смены языка для {user_id}")
-            # Получаем актуальный язык пользователя
             current_lang = await get_current_user_language(user_id)
             keyboard = [
                 [InlineKeyboardButton("🇬🇧 English", callback_data="lang_en")],
@@ -247,692 +314,410 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🇩🇪 Deutsch", callback_data="lang_de")],
                 [InlineKeyboardButton("🇫🇷 Français", callback_data="lang_fr")]
             ]
-            print(f"[LOG] Отправка меню выбора языка для {user_id}")
-            await query.message.edit_text(
-                text=get_message("language_select", current_lang),
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
+            await query.message.edit_text(text=get_message("language_select", current_lang), reply_markup=InlineKeyboardMarkup(keyboard))
             USER_CURRENT_MENUS[user_id] = "language"
-            print(f"[LOG] Установлено текущее меню для {user_id}: language")
     except Exception as e:
-        print(f"[ERROR] Ошибка обработки кнопки для {user_id}: {e}")
+        logger.error(f"Ошибка обработки кнопки для {user_id}: {e}")
         current_lang = await get_current_user_language(user_id)
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=get_message("button_error", current_lang),
-            reply_markup=get_main_menu_keyboard(current_lang)
-        )
+        await context.bot.send_message(chat_id=user_id, text=get_message("button_error", current_lang), reply_markup=get_main_menu_keyboard(current_lang))
         USER_CURRENT_MENUS[user_id] = "main"
 
-async def show_settings_menu_from_callback(query, context, user_id: int):
-    print(f"[LOG] Отображение меню настроек из callback для {user_id}")
-    try:
-        state = USER_STATES.get(user_id)
-        if not state:
-            print(f"[LOG] Нет состояния для пользователя {user_id}")
-            return
-        current_subs = state["current_subs"]
-        current_lang = state["language"]
-        print(f"[LOG] Текущие подписки {user_id}: {current_subs}")
-        print(f"[LOG] Текущий язык {user_id}: {current_lang}")
-        keyboard = []
-        categories = await rss_manager.get_categories()
-        print(f"[LOG] Доступные категории: {categories}")
-        for category in categories:
-            is_selected = category in current_subs
-            text = f"{'✅ ' if is_selected else '🔲 '}{category.capitalize()}"
-            print(f"[LOG] Категория {category}, выбрана: {is_selected}")
-            keyboard.append([InlineKeyboardButton(text, callback_data=f"toggle_{category}")])
-        keyboard.append([InlineKeyboardButton(get_message("save_button", current_lang), callback_data="save_settings")])
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        print(f"[LOG] Создана клавиатура настроек для {user_id}")
-        await context.bot.send_message(
-            chat_id=user_id,
-            text=get_message("settings_title", current_lang),
-            reply_markup=reply_markup
-        )
-        print(f"[LOG] Отправлено меню настроек пользователю {user_id}")
-    except Exception as e:
-        print(f"[ERROR] Ошибка в show_settings_menu_from_callback для {user_id}: {e}")
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print(f"[LOG] Вызов команды /help от пользователя {update.effective_user.id}")
-    user_id = update.effective_user.id
-    # Используем улучшенную функцию получения языка
-    lang = await get_current_user_language(user_id)
-    print(f"[LOG] Актуальный язык пользователя {user_id}: {lang}")
-    help_text = get_message("help_text", lang)
-    print(f"[LOG] Отправка справки пользователю {user_id}")
-    await update.message.reply_text(help_text, parse_mode='HTML', reply_markup=get_main_menu_keyboard(lang))
-    USER_CURRENT_MENUS[user_id] = "main"
-    print(f"[LOG] Установлено текущее меню для {user_id}: main")
-
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_manager = UserManager()
-    print(f"[LOG] Вызов команды /status от пользователя {update.effective_user.id}")
-    user_id = update.effective_user.id
-    # Используем улучшенную функцию получения языка
-    lang = await get_current_user_language(user_id)
-    print(f"[LOG] Актуальный язык пользователя {user_id}: {lang}")
-    settings = await user_manager.get_user_settings(user_id)
-    print(f"[LOG] Настройки пользователя {user_id}: {settings}")
-    categories = settings["subscriptions"]
-    categories_text = ", ".join(categories) if categories else get_message("no_subscriptions", lang)
-    print(f"[LOG] Категории пользователя {user_id}: {categories_text}")
-    status_text = get_message("status_text", lang, 
-                             language=LANG_NAMES.get(settings["language"], "English"),
-                             categories=categories_text)
-    print(f"[LOG] Отправка статуса пользователю {user_id}")
-    await update.message.reply_text(status_text, parse_mode='HTML', reply_markup=get_main_menu_keyboard(lang))
-    USER_CURRENT_MENUS[user_id] = "main"
-    print(f"[LOG] Установлено текущее меню для {user_id}: main")
-
 async def handle_menu_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print(f"[LOG] Обработка выбора меню от пользователя {update.effective_user.id}")
+    """Обработчик выбора пункта меню."""
     user_id = update.effective_user.id
-    # Используем улучшенную функцию получения языка
     lang = await get_current_user_language(user_id)
     text = update.message.text
-    print(f"[LOG] Пользователь {user_id} выбрал: {text}")
-    print(f"[LOG] Актуальный язык пользователя из памяти/БД: {lang}")
-    # Получаем все возможные варианты текста кнопок для текущего языка
-    menu_settings = get_message("menu_settings", lang)
-    menu_help = get_message("menu_help", lang)
-    menu_status = get_message("menu_status", lang)
-    menu_language = get_message("menu_language", lang)
-    print(f"[LOG] Сравнение с кнопками на языке {lang}: Settings='{menu_settings}', Help='{menu_help}', Status='{menu_status}', Language='{menu_language}'")
-    # Также проверяем на всех других языках для надежности
+    menu_actions = {
+        get_message("menu_settings", lang): settings_command,
+        get_message("menu_help", lang): help_command,
+        get_message("menu_status", lang): status_command,
+        get_message("menu_language", lang): change_language_command,
+    }
+    action = menu_actions.get(text)
+    if action:
+        await action(update, context)
+        return
     all_languages = ["en", "ru", "de", "fr"]
-    language_matches = {}
     for check_lang in all_languages:
-        settings_text = get_message("menu_settings", check_lang)
-        help_text = get_message("menu_help", check_lang)
-        status_text = get_message("menu_status", check_lang)
-        language_text = get_message("menu_language", check_lang)
-        if text == settings_text:
-            language_matches[check_lang] = "settings"
-        elif text == help_text:
-            language_matches[check_lang] = "help"
-        elif text == status_text:
-            language_matches[check_lang] = "status"
-        elif text == language_text:
-            language_matches[check_lang] = "language"
-    print(f"[LOG] Совпадения по языкам: {language_matches}")
-    if text == menu_settings:
-        print(f"[LOG] Выбрана настройка для {user_id}")
-        await settings_command(update, context)
-    elif text == menu_help:
-        print(f"[LOG] Выбрана помощь для {user_id}")
-        await help_command(update, context)
-    elif text == menu_status:
-        print(f"[LOG] Выбран статус для {user_id}")
-        await status_command(update, context)
-    elif text == menu_language:
-        print(f"[LOG] Выбран язык для {user_id}")
-        await change_language_command(update, context)
-    elif language_matches:
-        # Если есть совпадения на других языках, используем первое найденное
-        matched_lang = list(language_matches.keys())[0]
-        matched_action = language_matches[matched_lang]
-        print(f"[LOG] Найдено совпадение на языке {matched_lang}: {matched_action}")
-        # Обновляем язык пользователя
-        await set_current_user_language(user_id, matched_lang)
-        print(f"[LOG] Обновлен язык пользователя {user_id} на {matched_lang}")
-        # Выполняем соответствующее действие с новым языком
-        if matched_action == "settings":
-            await settings_command(update, context)
-        elif matched_action == "help":
-            await help_command(update, context)
-        elif matched_action == "status":
-            await status_command(update, context)
-        elif matched_action == "language":
-            await change_language_command(update, context)
-    else:
-        print(f"[LOG] Неизвестный выбор меню для {user_id}: {text}")
+        if text in [get_message(f"menu_{m}", check_lang) for m in ["settings", "help", "status", "language"]]:
+            await set_current_user_language(user_id, check_lang)
+            new_menu_actions = {
+                get_message("menu_settings", check_lang): settings_command,
+                get_message("menu_help", check_lang): help_command,
+                get_message("menu_status", check_lang): status_command,
+                get_message("menu_language", check_lang): change_language_command,
+            }
+            new_action = new_menu_actions.get(text)
+            if new_action:
+                await new_action(update, context)
+            return
+    logger.info(f"Неизвестный выбор меню для {user_id}: {text}")
 
-async def change_language_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print(f"[LOG] Вызов команды смены языка от пользователя {update.effective_user.id}")
-    user_id = update.effective_user.id
-    # Используем улучшенную функцию получения языка
-    lang = await get_current_user_language(user_id)
-    print(f"[LOG] Актуальный язык пользователя {user_id}: {lang}")
-    keyboard = [
-        [InlineKeyboardButton("🇬🇧 English", callback_data="lang_en")],
-        [InlineKeyboardButton("🇷🇺 Русский", callback_data="lang_ru")],
-        [InlineKeyboardButton("🇩🇪 Deutsch", callback_data="lang_de")],
-        [InlineKeyboardButton("🇫🇷 Français", callback_data="lang_fr")]
-    ]
-    print(f"[LOG] Отправка меню выбора языка пользователю {user_id}")
-    await update.message.reply_text(
-        get_message("language_select", lang),
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-    USER_CURRENT_MENUS[user_id] = "language"
-    print(f"[LOG] Установлено текущее меню для {user_id}: language")
-
-@retry(stop=stop_after_attempt(5), 
-       wait=wait_exponential(multiplier=1, min=2, max=30))
-async def send_personal_news(bot, news_item: dict, translations_dict: dict):
-    """
-    Отправляет персональные новости подписчикам на основе их подписок и языка.
-    Использует заранее подготовленные переводы.
-    :param bot: Экземпляр бота python-telegram-bot.
-    :param news_item: Словарь с оригинальными данными новости.
-    :param translations_dict: Словарь переводов, полученный из prepare_translations.
-                              Формат: {'ru': {'title': '...', 'description': '...', 'category': '...'}, ...}
-    """
-    # Предполагаем, что UserManager доступен
-    # Если он находится в другом модуле, импортируйте его
-    # from your_user_module import UserManager 
-    user_manager = UserManager() 
-    original_title = news_item['title']
-    news_id = news_item.get('id')  # Получаем ID новости
-    print(f"[LOG] Отправка персональной новости: {original_title[:50]}...")
-    category = news_item.get('category')
-    if not category:
-        print("[WARN] Категория новости не указана. Персональная рассылка пропущена.")
-        return
-    subscribers = await user_manager.get_subscribers_for_category(category)
-    print(f"[LOG] Найдено {len(subscribers)} подписчиков для категории {category}")
-    if not subscribers:
-        print(f"[LOG] Нет подписчиков для категории {category}.")
-        return
-
-    for user in subscribers:
-        try:
-            user_id = user['id']
-            user_lang = user.get('language_code', 'en') # Получаем язык пользователя, по умолчанию 'en'
-            # --- Получение переведенного контента ---
-            # 1. Пытаемся получить перевод для языка пользователя
-            translation_data = translations_dict.get(user_lang)
-            if translation_data and isinstance(translation_data, dict):
-                # Используем готовый перевод
-                title_to_send = translation_data.get('title', original_title)
-                description_to_send = translation_data.get('description', news_item.get('description', ''))
-                # category_to_send = translation_data.get('category', category) # Если нужно
-            else:
-                # 2. Если перевод для языка пользователя отсутствует или поврежден,
-                #    используем оригинальные данные
-                print(f"[WARN] Перевод для языка '{user_lang}' не найден или некорректен для новости '{original_title[:30]}...'. Отправляем оригинал.")
-                title_to_send = original_title
-                description_to_send = news_item.get('description', '')
-                # category_to_send = category # Если нужно
-            title_to_send = clean_html(title_to_send) 
-            description_to_send = clean_html(description_to_send)
-            # --- Формирование примечания о переводе ---
-            lang_note = ""
-            original_news_lang = news_item.get('lang', '')
-            if user_lang != original_news_lang:
-                 lang_note = f"\n\n🌐 {TRANSLATED_FROM_LABELS.get(user_lang, 'Translated from')} {original_news_lang.upper()}"
-            # --- Формирование сообщения ---
-            # Используем .get() с дефолтными значениями для надежности
-            content_text = (
-                f"🔥 <b>{title_to_send}</b>\n"
-                f"{description_to_send}\n"
-                f"FROM: {news_item.get('source', 'Unknown Source')}\n"
-                f"CATEGORY: {category}{lang_note}\n" # Используем оригинальную категорию или category_to_send
-                f"⚡ <a href='{news_item.get('link', '#')}'>{READ_MORE_LABELS.get(user_lang, 'Read more')}</a>"
-            )
-            image_filename = news_item.get('image_filename')
-            if image_filename and os.path.exists(os.path.join(IMAGES_ROOT_DIR, image_filename)):
-                absolute_image_path = os.path.join(IMAGES_ROOT_DIR, image_filename)
-                # Отправляем через send_photo с локальным файлом
-                caption = content_text
-                if len(caption) > 1024:
-                    # Обрезаем description, сохраняя title, остальные элементы
-                    max_desc_length = 1024 - len(f"🔥 <b>{title_to_send}</b>\nFROM: {news_item.get('source', 'Unknown Source')}\nCATEGORY: {category}{lang_note}\n⚡ <a href='{news_item.get('link', '#')}'>{READ_MORE_LABELS.get(user_lang, 'Read more')}</a>")
-                    if max_desc_length > 0:
-                        truncated_desc = description_to_send[:max_desc_length-3] + "..."
-                        caption = f"🔥 <b>{title_to_send}</b>\n{truncated_desc}\nFROM: {news_item.get('source', 'Unknown Source')}\nCATEGORY: {category}{lang_note}\n⚡ <a href='{news_item.get('link', '#')}'>{READ_MORE_LABELS.get(user_lang, 'Read more')}</a>"
-                    else:
-                        # Если даже без description не влезает, обрезаем минимально
-                        caption = caption[:1021] + "..."
-                await bot.send_photo(
-                    chat_id=user_id,
-                    photo=absolute_image_path,
-                    caption=caption,
-                    parse_mode="HTML",
-                    read_timeout=30,
-                    write_timeout=30,
-                    connect_timeout=30
-                )
-            else:
-                # Отправляем обычное сообщение
-                await bot.send_message(
-                    chat_id=user_id,
-                    text=content_text,
-                    parse_mode="HTML",
-                    disable_web_page_preview=True,
-                    read_timeout=30,
-                    write_timeout=30,
-                    connect_timeout=30
-                )
-            print(f"[LOG] Персональная новость отправлена пользователю {user_id}.")
-            await asyncio.sleep(0.1) # Небольшая задержка между отправками
-        except KeyError as e:
-            print(f"[ERROR] Отсутствует ключ в данных пользователя {user.get('id', 'Unknown ID')}: {e}")
-        except Exception as e: # Более общий перехватчик
-            print(f"[ERROR] Ошибка отправки персональной новости пользователю {user.get('id', 'Unknown ID')}: {e}")
-
-@retry(stop=stop_after_attempt(5), 
-       wait=wait_exponential(multiplier=1, min=2, max=30))
-async def post_to_channel(bot, news_item: dict, translations_dict: dict):
-    """
-    Публикует новость в Telegram-каналы, используя готовые переводы.
-    :param bot: Экземпляр бота python-telegram-bot.
-    :param news_item: Словарь с оригинальными данными новости 
-                      (title, description, lang, category, source, link, id).
-    :param translations_dict: Словарь переводов, полученный из prepare_translations.
-    """
-    original_title = news_item['title']
-    news_id = news_item.get('id')  # Получаем ID новости
-    print(f"[DEBUG] post_to_channel news_item = {news_item}")
-    print(f"[LOG] Публикация новости в каналы: {original_title[:50]}...")
-
-    for target_lang, channel_id in CHANNEL_IDS.items():
-        try:
-            await asyncio.sleep(0.5) # По-прежнему нужно для соблюдения лимитов Telegram
-            # Получаем готовые переводы
-            translation_data = translations_dict.get(target_lang, {})
-            if not translation_data:
-                 print(f"[WARN] Нет данных перевода для языка {target_lang}. Пропущено.")
-                 continue
-            title = translation_data.get('title', original_title)
-            description = translation_data.get('description', news_item.get('description', ''))
-            translated_category = translation_data.get('category', news_item.get('category', ''))
-            # --- Логика формирования сообщения ---
-            original_lang = news_item['lang']
-            needs_translation_note = original_lang != target_lang
-            lang_note = ""
-            if needs_translation_note:
-                lang_note = f"\n\n🌐 {TRANSLATED_FROM_LABELS.get(target_lang, 'Translated from')} {original_lang.upper()}"
-            # --- Формирование хэштегов ---
-            hashtags = f"\n#{translated_category} #{news_item.get('source', 'UnknownSource')}"
-            has_description = bool(description and description.strip())
-            # --- Формирование базового контента ---
-            content_text = f"<b>{title}</b>"
-            if has_description:
-                content_text += f"\n\n{description}"
-            content_text += f"{lang_note}\n{hashtags}"
-            # --- Отправка в зависимости от наличия изображения ---
-            image_filename = news_item.get('image_filename')
-
-            if image_filename and os.path.exists(os.path.join(IMAGES_ROOT_DIR, image_filename)):
-                absolute_image_path = os.path.join(IMAGES_ROOT_DIR, image_filename)
-                # Отправляем через send_photo с локальным файлом
-                caption = content_text
-                if len(caption) > 1024:
-                    # Обрезаем description, сохраняя title, lang_note и hashtags
-                    max_desc_length = 1024 - len(f"<b>{title}</b>\n{lang_note}\n{hashtags}")
-                    if max_desc_length > 0:
-                        truncated_desc = description[:max_desc_length-3] + "..."
-                        caption = f"<b>{title}</b>\n{truncated_desc}\n{lang_note}\n{hashtags}"
-                    else:
-                        # Если даже без description не влезает, обрезаем минимально
-                        caption = caption[:1021] + "..."
-                await bot.send_photo(
-                    chat_id=channel_id,
-                    photo=absolute_image_path,
-                    caption=caption,
-                    parse_mode='HTML',
-                    read_timeout=30,
-                    write_timeout=30,
-                    connect_timeout=30
-                )
-            else:
-                # Отправляем обычное сообщение
-                await bot.send_message(
-                    chat_id=channel_id,
-                    text=content_text,
-                    parse_mode='HTML',
-                    disable_web_page_preview=True,
-                    read_timeout=30,
-                    write_timeout=30,
-                    connect_timeout=30
-                )
-            print(f"[LOG] Опубликовано в {channel_id}: {title[:50]}...")
-        except TelegramError as e:
-            print(f"[ERROR] Ошибка отправки в {channel_id}: {e}")
-        except KeyError as e:
-            print(f"[ERROR] Отсутствует ключ в данных для {target_lang}: {e}")
-        except Exception as e:
-            print(f"[ERROR] Неожиданная ошибка для {target_lang}: {e}")
 async def debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print(f"[LOG] Получено сообщение: {update.message.text} от {update.effective_user.id}")
+    """Обработчик отладочных сообщений."""
     user_id = update.effective_user.id
-    # Используем улучшенную функцию получения языка
     lang = await get_current_user_language(user_id)
     await update.message.reply_text(get_message("bot_active", lang), reply_markup=get_main_menu_keyboard(lang))
     USER_CURRENT_MENUS[user_id] = "main"
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if isinstance(context.error, NetworkError):
-        print("[ERROR] Network error detected. Retrying...")
-    elif isinstance(context.error, BadRequest):
-        if "Query is too old" in str(context.error):
-            print("[ERROR] Ignoring outdated callback query")
-            return
-    else:
-        print(f"[ERROR] Другая ошибка: {context.error}")
 
-async def process_news_item(context, rss_manager, news):
-    """
-    Основная функция обработки новости
-    """
-    global translator_queue
-    
-    news_id = news.get('id')
-    news_link = news.get('link')
-    rss_feed_id = news.get('rss_feed_id')
-    image_url = news.get('image_url')
-    image_filename = None
-    local_image_path = None
-    
-    print(f"[DEBUG] process_news_item: Начало обработки новости {news_id}")
+def clean_html(text):
+    """Очищает HTML-теги из текста."""
+    if not text:
+        return ""
+    # Используем стандартную функцию для экранирования HTML
+    return html.escape(text)
 
-    # 1. Готовим переводы через очередь задач
-    print(f"[DEBUG] process_news_item: Перед добавлением задачи перевода для {news_id}")
+@retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=2, max=30))
+async def send_personal_news(bot, prepared_news_item: PreparedNewsItem):
+    """Отправляет персональные новости подписчикам."""
+    global user_manager
+    news_id = prepared_news_item.original_data.get('id')
+    logger.info(f"Отправка персональной новости: {prepared_news_item.original_data['title'][:50]}...")
+    category = prepared_news_item.original_data.get('category')
+    if not category: 
+        logger.warning(f"Новость {news_id} не имеет категории")
+        return
+    subscribers = await user_manager.get_subscribers_for_category(category)
+    if not subscribers: 
+        logger.info(f"Нет подписчиков для категории {category}")
+        return
+    translations_cache = prepared_news_item.translations
+    original_news_lang = prepared_news_item.original_data.get('lang', '')
     
-    # Создаем future для ожидания результата
-    translation_result = asyncio.Future()
+    for i, user in enumerate(subscribers):
+        try:
+            user_id = user['id']
+            user_lang = user.get('language_code', 'en')
+            
+            # Проверяем, есть ли у новости контент на языке пользователя
+            title_to_send = None
+            description_to_send = None
+            
+            # Если язык пользователя совпадает с языком оригинала новости
+            if user_lang == original_news_lang:
+                title_to_send = prepared_news_item.original_data['title']
+                description_to_send = prepared_news_item.original_data.get('description', '')
+            # Иначе ищем перевод на язык пользователя
+            elif user_lang in translations_cache and translations_cache[user_lang]:
+                translation_data = translations_cache[user_lang]
+                title_to_send = translation_data.get('title', '')
+                description_to_send = translation_data.get('description', '')
+                
+            # Если нет подходящего контента, пропускаем пользователя
+            if not title_to_send or not title_to_send.strip():
+                logger.debug(f"Пропуск пользователя {user_id} - нет контента на языке {user_lang}")
+                continue
+                
+            title_to_send = clean_html(title_to_send)
+            description_to_send = clean_html(description_to_send)
+            
+            lang_note = ""
+            if user_lang != original_news_lang:
+                lang_note = f"\n🌐 {TRANSLATED_FROM_LABELS.get(user_lang, 'Translated from')} {original_news_lang.upper()}"
+            content_text = (
+                f"🔥 <b>{title_to_send}</b>\n"
+                f"\n\n{description_to_send}\n"
+                f"\nFROM: {prepared_news_item.original_data.get('source', 'Unknown Source')}\n"
+                f"CATEGORY: {category}\n{lang_note}\n"
+                f"⚡ <a href='{prepared_news_item.original_data.get('link', '#')}'>{READ_MORE_LABELS.get(user_lang, 'Read more')}</a>"
+            )
+            image_filename = prepared_news_item.image_filename
+            logger.debug(f"send_personal_news image_filename = {image_filename}")
+
+            if image_filename:
+                import re
+                valid_image_url = re.match(r'^https?://.+\.(jpg|jpeg|png|gif|webp)(\?.*)?$', image_filename, re.IGNORECASE)
+
+                if not valid_image_url:
+                    logger.warning(f"Недопустимый URL изображения для Telegram: {image_filename}")
+                    return # Выходим из текущей итерации
+
+                caption = content_text
+                if len(caption) > 1024:
+                    base_text = f"🔥 <b>{title_to_send}</b>\nFROM: {prepared_news_item.original_data.get('source', 'Unknown Source')}\nCATEGORY: {category}{lang_note}\n⚡ <a href='{prepared_news_item.original_data.get('link', '#')}'>{READ_MORE_LABELS.get(user_lang, 'Read more')}</a>"
+                    max_desc_length = 1024 - len(base_text)
+                    if max_desc_length > 0:
+                        truncated_desc = description_to_send[:max_desc_length-3] + "..."
+                        caption = f"🔥 <b>{title_to_send}</b>\n{truncated_desc}\n{base_text}"
+                    else:
+                        caption = caption[:1021] + "..."
+                try:
+                    await bot.send_photo(chat_id=user_id, photo=image_filename, caption=caption, parse_mode="HTML")
+                except RetryAfter as e:
+                    logger.warning(f"Flood control для пользователя {user_id}, ждем {e.retry_after} секунд")
+                    await asyncio.sleep(e.retry_after + 1)
+                    await bot.send_photo(chat_id=user_id, photo=image_filename, caption=caption, parse_mode="HTML")
+                except Exception as e:
+                    logger.error(f"Ошибка отправки фото пользователю {user_id}: {e}")
+            else:
+                try:
+                    await bot.send_message(chat_id=user_id, text=content_text, parse_mode="HTML", disable_web_page_preview=True)
+                except RetryAfter as e:
+                    logger.warning(f"Flood control для пользователя {user_id}, ждем {e.retry_after} секунд")
+                    await asyncio.sleep(e.retry_after + 1)
+                    await bot.send_message(chat_id=user_id, text=content_text, parse_mode="HTML", disable_web_page_preview=True)
+                except Exception as e:
+                    logger.error(f"Ошибка отправки сообщения пользователю {user_id}: {e}")
+            
+            if i < len(subscribers) - 1:
+                await asyncio.sleep(0.5)
+        except Exception as e:
+            logger.error(f"Ошибка отправки персональной новости пользователю {user.get('id', 'Unknown ID')}: {e}")
+
+@retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=2, max=30))
+async def post_to_channel(bot, prepared_news_item: PreparedNewsItem):
+    """Публикует новость в Telegram-каналы."""
+    original_title = prepared_news_item.original_data['title']
+    news_id = prepared_news_item.original_data.get('id')
+    logger.info(f"Публикация новости в каналы: {original_title[:50]}...")
+    logger.debug(f"post_to_channel prepared_news_item = {prepared_news_item}")
+    original_description = prepared_news_item.original_data.get('description', '')
+    category = prepared_news_item.original_data.get('category', '')
+    original_source = prepared_news_item.original_data.get('source', 'UnknownSource')
+    original_lang = prepared_news_item.original_data['lang']
+    translations_cache = prepared_news_item.translations
+    channels_list = list(CHANNEL_IDS.items())
     
-    # Callback функции для обработки результата
-    def on_translation_success(result, task_id=None):
-        if not translation_result.done():
-            translation_result.set_result(result)
-    
-    def on_translation_error(error_data):
-        if not translation_result.done():
-            translation_result.set_exception(Exception(error_data['error']))
-    
-    try:
-        # Добавляем задачу в очередь
-        task_added = await translator_queue.add_task(
-            title=news['title'],
-            description=news['description'],
-            category=news['category'],
-            original_lang=news['lang'],
-            callback=on_translation_success,
-            error_callback=on_translation_error,
-            task_id=news_id  # Используем ID новости как task_id
+    for i, (target_lang, channel_id) in enumerate(channels_list):
+        try:
+            # Проверяем, есть ли у новости контент на языке канала
+            title = None
+            description = None
+            
+            # Если язык канала совпадает с языком оригинала новости
+            if target_lang == original_lang:
+                title = original_title
+                description = original_description
+            # Иначе ищем перевод на язык канала
+            elif target_lang in translations_cache and translations_cache[target_lang]:
+                translation_data = translations_cache[target_lang]
+                title = translation_data.get('title', '')
+                description = translation_data.get('description', '')
+                
+            # Если нет подходящего контента, пропускаем канал
+            if not title or not title.strip():
+                logger.debug(f"Пропуск канала {channel_id} - нет контента на языке {target_lang}")
+                continue
+                
+            if i > 0:
+                await asyncio.sleep(1.0)
+            
+            lang_note = f"\n🌐 {TRANSLATED_FROM_LABELS.get(target_lang, 'Translated from')} {original_lang.upper()}" if original_lang != target_lang else ""
+            hashtags = f"\n#{category} #{original_source}"
+            content_text = f"<b>{title}</b>\n"
+            if description and description.strip():
+                content_text += f"\n{description}\n"
+            content_text += f"{lang_note}{hashtags}"
+            image_filename = prepared_news_item.image_filename
+            logger.debug(f"post_to_channel image_filename = {image_filename}")
+
+            if image_filename:
+                valid_image_url = re.match(r'^https?://.+\.(jpg|jpeg|png|gif|webp)(\?.*)?$', image_filename, re.IGNORECASE)
+
+                if not valid_image_url:
+                    logger.warning(f"Недопустимый URL изображения для Telegram: {image_filename}")
+                    return # Выходим из текущей итерации
+
+                caption = content_text
+                if len(caption) > 1024:
+                    base_text = f"<b>{title}</b>{lang_note}{hashtags}"
+                    max_desc_length = 1024 - len(base_text)
+                    if max_desc_length > 0:
+                        truncated_desc = description[:max_desc_length-3] + "..."
+                        caption = f"<b>{title}</b>\n{truncated_desc}{lang_note}{hashtags}"
+                    else:
+                        caption = caption[:1021] + "..."
+                try:
+                    await bot.send_photo(chat_id=channel_id, photo=image_filename, caption=caption, parse_mode='HTML')
+                except RetryAfter as e:
+                    logger.warning(f"Flood control для канала {channel_id}, ждем {e.retry_after} секунд")
+                    await asyncio.sleep(e.retry_after + 1)
+                    await bot.send_photo(chat_id=channel_id, photo=image_filename, caption=caption, parse_mode='HTML')
+                except Exception as e:
+                    logger.error(f"Ошибка отправки фото в канал {channel_id}: {e}")
+            else:
+                try:
+                    await bot.send_message(chat_id=channel_id, text=content_text, parse_mode='HTML', disable_web_page_preview=True)
+                except RetryAfter as e:
+                    logger.warning(f"Flood control для канала {channel_id}, ждем {e.retry_after} секунд")
+                    await asyncio.sleep(e.retry_after + 1)
+                    await bot.send_message(chat_id=channel_id, text=content_text, parse_mode='HTML', disable_web_page_preview=True)
+                except Exception as e:
+                    logger.error(f"Ошибка отправки сообщения в канал {channel_id}: {e}")
+            logger.info(f"Опубликовано в {channel_id}: {title[:50]}...")
+        except Exception as e:
+            logger.error(f"Ошибка отправки в {channel_id}: {e}")
+
+# --- Основная логика обработки новостей ---
+async def process_news_item(context, news_item_from_api):
+    """Обрабатывает новость, полученную из API."""
+    async with NEWS_PROCESSING_SEMAPHORE:
+        news_id = news_item_from_api.get('news_id')
+        logger.debug(f"Начало обработки новости {news_id} из API")
+
+        # Преобразуем данные из API в формат, ожидаемый остальным кодом
+        original_data = {
+            'id': news_item_from_api.get('news_id'),
+            'title': news_item_from_api.get('original_title'),
+            'description': news_item_from_api.get('original_content'),
+            'category': news_item_from_api.get('category'),
+            'source': news_item_from_api.get('source'),
+            'lang': news_item_from_api.get('original_language'),
+            'link': news_item_from_api.get('source_url'),
+            'image_url': news_item_from_api.get('image_url')
+        }
+
+        logger.debug(f"original_data = {original_data}")
+        
+        # Обработка переводов
+        translations = {}
+        if news_item_from_api.get('translations'):
+            for lang, translation_data in news_item_from_api['translations'].items():
+                translations[lang] = {
+                    'title': translation_data.get('title', ''),
+                    'description': translation_data.get('content', ''),
+                    'category': translation_data.get('category', '')
+                }
+        
+        logger.debug(f"Подготовка новости {news_id} завершена.")
+        
+        prepared_news_item = PreparedNewsItem(
+            original_data=original_data,
+            translations=translations,
+            image_filename=original_data.get('image_url') # потому что так возвращает API
         )
         
-        if not task_added:
-            print(f"[ERROR] process_news_item: Не удалось добавить задачу перевода для {news_id}")
-            translations = {}
-        else:
-            # Ждем результат перевода
-            translations = await translation_result
-            print(f"[DEBUG] process_news_item: Перевод завершен для {news_id}")
-            
-    except Exception as e:
-        print(f"[ERROR] process_news_item: Ошибка при обработке перевода для {news_id}: {e}")
-        import traceback
-        traceback.print_exc()
-        translations = {}
-
-    # 2. Обработка изображений
-    print(f"[DEBUG] process_news_item: Перед обработкой изображений для {news_id}")
-    if news_link and news_id:
-        try:
-            if image_url:
-                print(f"[DEBUG] process_news_item: Загрузка изображения по URL для {news_id}")
-                local_image_path = await download_and_save_image(image_url, news_id)
-            else:
-                print(f"[DEBUG] process_news_item: Извлечение URL изображения из превью для {news_id}")
-                image_url = await extract_image_from_preview(news_link)
-                if image_url:
-                    print(f"[DEBUG] process_news_item: Загрузка извлеченного изображения для {news_id}")
-                    local_image_path = await download_and_save_image(image_url, news_id)
-
-            if local_image_path and os.path.exists(local_image_path):
-                # Вычисляем относительный путь от IMAGES_ROOT_DIR
-                if local_image_path.startswith(IMAGES_ROOT_DIR):
-                    # Убираем базовую директорию и нормализуем путь
-                    image_filename = local_image_path[len(IMAGES_ROOT_DIR):].lstrip('/')
-                else:
-                    # fallback на случай, если путь не соответствует ожидаемой структуре
-                    image_filename = os.path.basename(local_image_path)
-                print(f"[DEBUG] process_news_item: Изображение сохранено как {image_filename} для {news_id}")
-                news['image_filename'] = image_filename
-
-        except Exception as e:
-            print(f"[ERROR] process_news_item: Ошибка при обработке изображения для {news_id}: {e}")
-            import traceback
-            traceback.print_exc()
-    print(f"[DEBUG] process_news_item: После обработки изображений для {news_id}")
-
-    print(f"[DEBUG] process_news_items - image_url: {image_url}, image_filename: {image_filename}, local_image_path = {local_image_path}")
-
-    # 3. Сохраняем в БД
-    print(f"[DEBUG] process_news_item: Перед вызовом mark_as_published для {news_id}")
-    try:
-        success_db = await rss_manager.mark_as_published(
-            title=news['title'],
-            content=news['description'],
-            url=news['link'],
-            original_language=news['lang'],
-            translations_dict=translations,
-            category_name=news['category'],
-            image_filename=image_filename,
-            rss_feed_id=rss_feed_id
-        )
-        print(f"[DEBUG] process_news_item: После вызова mark_as_published для {news_id}, результат: {success_db}")
-    except Exception as e:
-        print(f"[ERROR] process_news_item: Ошибка в mark_as_published для {news_id}: {e}")
-        import traceback
-        traceback.print_exc()
-        success_db = False
-
-    # 4. Отправляем в Telegram
-    if success_db:
-        print("[MAIN] Данные новости успешно обработаны и сохранены в БД.")
-        # Создаем обёртки, которые используют семафор
         async def limited_post_to_channel():
-            try:
-                async with SEND_SEMAPHORE:
-                    await post_to_channel(context.bot, news, translations)
-            except Exception as e:
-                print(f"[ERROR] process_news_item: Ошибка в limited_post_to_channel для {news_id}: {e}")
-                import traceback
-                traceback.print_exc()
+            async with SEND_SEMAPHORE:
+                await post_to_channel(context.bot, prepared_news_item)
 
         async def limited_send_personal_news():
-            try:
-                async with SEND_SEMAPHORE:
-                    await send_personal_news(context.bot, news, translations)
-            except Exception as e:
-                print(f"[ERROR] process_news_item: Ошибка в limited_send_personal_news для {news_id}: {e}")
-                import traceback
-                traceback.print_exc()
+            async with SEND_SEMAPHORE:
+                await send_personal_news(context.bot, prepared_news_item)
 
-        if news['category'] in CHANNEL_CATEGORIES:
-            print(f"[LOG] Новость категории '{news['category']}' подходит для общего канала. Планируем публикацию.")
-            asyncio.create_task(limited_post_to_channel())
+        tasks_to_await = []
+        if news_item_from_api.get('category') in CHANNEL_CATEGORIES:
+            logger.info(f"Новость категории '{news_item_from_api.get('category')}' подходит для общего канала.")
+            tasks_to_await.append(limited_post_to_channel())
         else:
-            print(f"[LOG] Новость категории '{news['category']}' НЕ подходит для общего канала. Публикация в канал пропущена.")
-        # Персональные новости отправляются всегда
-        asyncio.create_task(limited_send_personal_news())
-    else:
-        print("[MAIN] Ошибка обработки и сохранения данных в БД. Публикация в Telegram пропущена.")
-    
-    print(f"[DEBUG] process_news_item: Завершение обработки новости {news_id}")
-    return success_db
+            logger.info(f"Новость категории '{news_item_from_api.get('category')}' НЕ подходит для общего канала.")
+
+        tasks_to_await.append(limited_send_personal_news())
+
+        if tasks_to_await:
+             await asyncio.gather(*tasks_to_await, return_exceptions=True)
+
+        # Помечаем новость как опубликованную в Telegram
+        await mark_news_as_published(news_id)
+
+        logger.debug(f"Завершение обработки новости {news_id}")
+        return True
 
 async def monitor_news_task(context: ContextTypes.DEFAULT_TYPE):
-    """Асинхнхронная задача мониторинга новостей"""
-    print("[LOG] Запуск задачи мониторинга новостей")
+    logger.info("Запуск задачи мониторинга новостей")
     try:
-        news_list = await asyncio.wait_for(rss_manager.fetch_news(), timeout=120)
-        print(f"[LOG] Получено {len(news_list)} новостей")
-        # Обрабатываем новости пакетами
-        batch_size = 5 # Размер пакета
-        delay_between_batches = 10 # Задержка между пакетами в секундах
-        for i in range(0, len(news_list[:20]), batch_size):
-            batch = news_list[i:i + batch_size]
-            print(f"[LOG] Обработка пакета новостей {i//batch_size + 1} (размер: {len(batch)})")
-            batch_tasks = []
-            for news in batch:
-                # Создаем задачи для обработки новостей в пакете
-                task = asyncio.create_task(process_news_item(context, rss_manager, news))
-                batch_tasks.append(task)
-            # Ждем завершения всех задач в пакете
-            await asyncio.gather(*batch_tasks, return_exceptions=True)
-            # Пауза между пакетами
-            if i + batch_size < len(news_list[:20]): # Не делать паузу после последнего пакета
-                 print(f"[LOG] Пауза {delay_between_batches} секунд перед следующим пакетом...")
-                 await asyncio.sleep(delay_between_batches)
+        # Получаем необработанные новости через API
+        news_response = await get_news_list(display_language="en", limit=10, telegram_published="false")
+        if not isinstance(news_response, dict):
+            logger.error(f"Неверный формат ответа от API: {type(news_response)}")
+            return
+            
+        unprocessed_news_list = news_response.get("results", [])
+        logger.info(f"Получено {len(unprocessed_news_list)} новостей из API")
+        
+        if not unprocessed_news_list:
+             logger.info("Нет новостей для обработки.")
+             return
+
+        processing_tasks = [
+            process_news_item(context, news_item) 
+            for news_item in unprocessed_news_list
+        ]
+        
+        logger.info(f"Запуск обработки {len(processing_tasks)} новостей...")
+        try:
+            await asyncio.gather(*processing_tasks, return_exceptions=True)
+            logger.info("Все новости из текущей партии обработаны.")
+        except Exception as e:
+             logger.error(f"Ошибка при обработке партии новостей: {e}")
+             
     except asyncio.TimeoutError:
-        print("[ERROR] Таймаут получения новостей")
+        logger.error("Таймаут получения новостей")
     except Exception as e:
-        print(f"[ERROR] Ошибка в задаче мониторинга: {e}")
+        logger.error(f"Ошибка в задаче мониторинга: {e}")
 
-# --- Функции для пакетной обработки ---
-async def schedule_batch_processor(application: Application) -> None:
-    """Функция для планирования регулярной пакетной обработки"""
-    global rss_manager
-
-    if rss_manager and hasattr(rss_manager, 'dublicate_detector'):
-        job_queue = application.job_queue
-        if job_queue:
-            # Планируем задачу на выполнение каждые 30 минут (1800 секунд)
-            # first=60 означает, что первая задача запустится через 1 минуту после старта
-            job_queue.run_repeating(
-                batch_processor_job, # <-- Новая функция-обработчик задачи
-                interval=1800, # 30 минут в секундах
-                first=60, # Первая задача через 1 минуту
-                job_kwargs={'misfire_grace_time': 600} # 10 минут на выполнение с опозданием
-            )
-            print("[LOG] Зарегистрирована задача регулярной пакетной обработки (каждые 30 минут)")
-        else:
-            print("[WARN] JobQueue не доступна для планирования пакетной обработки")
-    else:
-        print("[WARN] RSSManager или DuplicateDetector не инициализированы для планирования пакетной обработки")
-
-async def batch_processor_job(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Функция, выполняемая по расписанию для пакетной обработки"""
-    global rss_manager
-
-    try:
-        print("[BATCH] Запуск регулярной пакетной обработки новостей без эмбеддингов...")
-        success, errors = await rss_manager.dublicate_detector.process_missing_embeddings_batch(
-            batch_size=50,
-            delay_between_items=0.1
+async def initialize_http_session():
+    """Инициализирует HTTP-сессию для работы с API."""
+    global http_session
+    if http_session is None:
+        # Добавляем повторные попытки и таймауты для более надежного соединения
+        connector = aiohttp.TCPConnector(
+            limit=100,
+            limit_per_host=30,
+            keepalive_timeout=30,
+            enable_cleanup_closed=True
         )
-        print(f"[BATCH] Регулярная пакетная обработка завершена. Успешно: {success}, Ошибок: {errors}")
-    except Exception as e:
-        print(f"[ERROR] Ошибка в регулярной пакетной обработке: {e}")
-        # Можно добавить логирование traceback для отладки
-        import traceback
-        traceback.print_exc()
+        timeout = aiohttp.ClientTimeout(total=30, connect=10)
+        http_session = aiohttp.ClientSession(
+            connector=connector,
+            timeout=timeout,
+            headers={'User-Agent': 'TelegramBot/1.0'}
+        )
+        logger.info("HTTP-сессия для API инициализирована")
 
-async def stop_batch_processor():
-    """Останавливает фоновую задачу пакетной обработки."""
-    global batch_processor_task
-    if batch_processor_task and not batch_processor_task.done():
-        print("[LOG] [BATCH_EMBEDDING] Отмена фоновой задачи пакетной обработки...")
-        batch_processor_task.cancel()
+async def cleanup_http_session():
+    """Закрывает HTTP-сессию."""
+    global http_session
+    if http_session:
         try:
-            # Дожидаемся завершения задачи (даже если она отменена)
-            await batch_processor_task
-        except asyncio.CancelledError:
-            print("[LOG] [BATCH_EMBEDDING] Фоновая задача пакетной обработки отменена.")
+            await http_session.close()
+            http_session = None
+            logger.info("HTTP-сессия закрыта")
         except Exception as e:
-            print(f"[ERROR] [BATCH_EMBEDDING] Ошибка при остановке задачи: {e}")
-
-async def cleanup_translator(application):
-    """Функция очистки ресурсов переводчика"""
-    print("[LOG] Начало очистки ресурсов переводчика...")
-    global translator_queue, translator
-    
-    if translator_queue:
-        try:
-            await translator_queue.wait_completion()  # Ждем завершения всех задач
-            await translator_queue.stop()             # Останавливаем очередь
-            print("[LOG] Очередь переводчика остановлена")
-        except Exception as e:
-            print(f"[ERROR] Ошибка остановки очереди: {e}")
-    
-    if translator:
-        try:
-            translator.shutdown()                     # Завершаем переводчик
-            print("[LOG] Переводчик завершен")
-        except Exception as e:
-            print(f"[ERROR] Ошибка завершения переводчика: {e}")
+            logger.error(f"Ошибка при закрытии HTTP-сессии: {e}")
 
 async def post_stop(application: Application) -> None:
-    """Функция, вызываемая при остановке приложения для корректного закрытия ресурсов"""
-    global rss_manager, user_manager, duplicate_detector
+    """Вызывается при остановке приложения."""
+    logger.info("Остановка приложения и закрытие ресурсов...")
     
-    print("[LOG] Остановка приложения и закрытие пулов подключений...")
+    await cleanup_http_session()
     
-    # Закрываем пул RSSManager
-    if rss_manager and hasattr(rss_manager, 'pool') and rss_manager.pool:
-        try:
-            rss_manager.pool.close()
-            await rss_manager.pool.wait_closed()
-            print("[LOG] Пул RSSManager закрыт")
-        except Exception as e:
-            print(f"[ERROR] Ошибка при закрытии пула RSSManager: {e}")
-    
-    # Закрываем пул UserManager
-    if user_manager and hasattr(user_manager, 'pool') and user_manager.pool:
-        try:
-            user_manager.pool.close()
-            await user_manager.pool.wait_closed()
-            print("[LOG] Пул UserManager закрыт")
-        except Exception as e:
-            print(f"[ERROR] Ошибка при закрытии пула UserManager: {e}")
-
-    # Закрываем пул FireFeedDuplicateDetector (классовый пул)
-
     try:
-        await FireFeedDuplicateDetector.close_pool()
-        print("[LOG] Пул FireFeedDuplicateDetector закрыт")
+        from config import close_shared_db_pool
+        await close_shared_db_pool()
+        logger.info("Общий пул подключений закрыт")
     except Exception as e:
-        print(f"[ERROR] Ошибка при закрытии пула FireFeedDuplicateDetector: {e}")
-
-    # Закрываем пул переводчика и выключаем его
-    await cleanup_translator(application)
+        logger.error(f"Ошибка при закрытии общего пула: {e}")
     
-    print("[LOG] Все пулы подключений закрыты")
+    logger.info("Все ресурсы освобождены")
 
+async def post_init(application: Application) -> None:
+    """Вызывается после инициализации приложения."""
+    global user_manager
+    logger.info("Приложение инициализировано")
+    
+    # Инициализируем user_manager
+    try:
+        user_manager = UserManager()
+        logger.info("UserManager инициализирован")
+    except Exception as e:
+        logger.error(f"Ошибка инициализации UserManager: {e}")
+    
+    await initialize_http_session()
+
+# --- Точка входа ---
 def main():
-    global rss_manager, user_manager, duplicate_detector, translator, translator_queue
-    print("[LOG] Запуск бота")
-
-    # Синхронная инициализация переводчика
-    translator = FireFeedTranslator(
-        device="cpu",
-        max_workers=4,
-        max_concurrent_translations=2
-    )
+    logger.info("=== НАЧАЛО ЗАПУСКА БОТА ===")
+    logger.info(f"Python version: {sys.version}")
+    logger.info(f"Current working directory: {os.getcwd()}")
+    logger.info(f"Bot token length: {len(BOT_TOKEN) if BOT_TOKEN else 0}")
     
-    # Синхронная инициализация очереди задач переводчика
-    translator_queue = FireFeedTranslatorTaskQueue(
-        translator, 
-        max_workers=2, 
-        queue_size=50
-    )
-    
-    # Создаем event loop для переводчика в отдельном потоке
-    def start_translator_loop():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(translator_queue.start())
-        loop.run_forever()
-    
-    translator_thread = threading.Thread(target=start_translator_loop, daemon=True)
-    translator_thread.start()
-    duplicate_detector = FireFeedDuplicateDetector()
-    rss_manager = RSSManager(duplicate_detector=duplicate_detector)
-    user_manager = UserManager()
-
-    # --- Создаем Application с post_stop ---
-    application = Application.builder().token(BOT_TOKEN).post_stop(post_stop).build()
+    application = Application.builder().token(BOT_TOKEN).post_stop(post_stop).post_init(post_init).build()
     
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("settings", settings_command))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CallbackQueryHandler(button_handler))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_menu_selection))
     application.add_handler(MessageHandler(filters.ALL, debug))
@@ -940,26 +725,30 @@ def main():
     
     job_queue = application.job_queue
     if job_queue:
-        job_queue.run_repeating(
-            monitor_news_task,
-            interval=600,
-            first=1,
-            job_kwargs={'misfire_grace_time': 600}
-        )
-        print("[LOG] Зарегистрирована задача мониторинга новостей")
-
-    # --- Добавляем запуск пакетной обработки эмбеддингов ---
-    application.post_init = schedule_batch_processor
-
-    print("[LOG] Бот запущен в режиме Webhook")
+        job_queue.run_repeating(monitor_news_task, interval=300, first=1, job_kwargs={'misfire_grace_time': 600})
+        logger.info("Зарегистрирована задача мониторинга новостей (каждые 5 минут)")
     
+    logger.info("Бот запущен в режиме Webhook")
     try:
         application.run_webhook(**WEBHOOK_CONFIG, close_loop=False)
     except (KeyboardInterrupt, SystemExit):
-        print("[LOG] Прервано пользователем или системой...")
+        logger.info("Прервано пользователем или системой...")
     except Exception as e:
-        print(f"[ERROR] Ошибка: {e}")
+        logger.error(f"Ошибка: {e}")
         raise
+
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик ошибок."""
+    if isinstance(context.error, NetworkError):
+        logger.error("Network error detected. Retrying...")
+    elif isinstance(context.error, BadRequest):
+        if "Query is too old" in str(context.error):
+            logger.error("Ignoring outdated callback query")
+            return
+        else:
+            logger.error(f"Bad request error: {context.error}")
+    else:
+        logger.error(f"Другая ошибка: {context.error}")
 
 if __name__ == "__main__":
     main()

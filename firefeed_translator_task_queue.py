@@ -3,7 +3,7 @@ from asyncio import Queue
 import time
 
 class FireFeedTranslatorTaskQueue:
-    def __init__(self, translator, max_workers=3, queue_size=100):
+    def __init__(self, translator, max_workers=1, queue_size=30):
         self.translator = translator
         self.queue = Queue(maxsize=queue_size)
         self.max_workers = max_workers
@@ -29,50 +29,36 @@ class FireFeedTranslatorTaskQueue:
             try:
                 # Получаем задачу с таймаутом
                 task = await asyncio.wait_for(self.queue.get(), timeout=1.0)
-                
                 start_time = time.time()
-                print(f"[{worker_id}] 📥 Начало обработки задачи")
-                
+                task_id = task.get('task_id', 'unknown')
+                print(f"[{worker_id}] 📥 Начало обработки задачи: {task_id[:20]}")
+
                 try:
-                    # Выполняем перевод
-                    result = await self.translator.prepare_translations(**task['data'])
+                    result = await self.translator.prepare_translations(
+                        **task['data'],
+                        callback=task.get('callback'),
+                        error_callback=task.get('error_callback'),
+                        task_id=task.get('task_id')
+                    )
                     
                     # Статистика
                     self.stats['processed'] += 1
-                    
-                    # Вызываем callback если есть
-                    if task.get('callback'):
-                        if asyncio.iscoroutinefunction(task['callback']):
-                            await task['callback'](result, task.get('task_id'))
-                        else:
-                            task['callback'](result, task.get('task_id'))
-                    
+
                     duration = time.time() - start_time
-                    print(f"[{worker_id}] ✅ Задача завершена за {duration:.2f} сек")
-                    
+                    print(f"[{worker_id}] ✅ Задача {task_id[:20]} завершена за {duration:.2f} сек")
                 except Exception as e:
                     # Статистика ошибок
                     self.stats['errors'] += 1
+                    print(f"[{worker_id}] ❌ Ошибка перевода для задачи {task_id[:20]}: {e}")
                     
-                    print(f"[{worker_id}] ❌ Ошибка перевода: {e}")
-                    if task.get('error_callback'):
-                        error_data = {
-                            'error': str(e),
-                            'task_data': task['data'],
-                            'task_id': task.get('task_id')
-                        }
-                        if asyncio.iscoroutinefunction(task['error_callback']):
-                            await task['error_callback'](error_data)
-                        else:
-                            task['error_callback'](error_data)
                 finally:
                     self.queue.task_done()
-                    
             except asyncio.TimeoutError:
                 # Продолжаем цикл если таймаут
                 continue
             except Exception as e:
                 print(f"[{worker_id}] ❌ Критическая ошибка воркера: {e}")
+                # traceback.print_exc() # Убрал, так как ошибка выше уже логируется
                 if not self.queue.empty():
                     self.queue.task_done()
     

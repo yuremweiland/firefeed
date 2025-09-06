@@ -1,22 +1,17 @@
 import asyncio
-import aiopg
 import json
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 from typing import List, Tuple, Optional, Dict, Any
 import logging
-from config import DB_CONFIG, NEWS_SIMILARITY_THRESHOLD
+from config import DB_CONFIG, NEWS_SIMILARITY_THRESHOLD, get_shared_db_pool
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class FireFeedDuplicateDetector:
-    # Классовый пул соединений для предотвращения множественного создания
-    _db_pool = None
-    _pool_lock = asyncio.Lock()
-    
     def __init__(self, model_name: str = 'all-MiniLM-L6-v2', similarity_threshold: float = NEWS_SIMILARITY_THRESHOLD):
         """
         Инициализация асинхронного детектора дубликатов новостей
@@ -29,18 +24,13 @@ class FireFeedDuplicateDetector:
         self.similarity_threshold = similarity_threshold
         self.embedding_dim = self._get_embedding_dimension()
     
-    async def _initialize_db_pool(self):
-        """Инициализация пула соединений с базой данных (один раз для всех экземпляров)"""
-        if FireFeedDuplicateDetector._db_pool is None:
-            async with FireFeedDuplicateDetector._pool_lock:
-                if FireFeedDuplicateDetector._db_pool is None:
-                    try:
-                        FireFeedDuplicateDetector._db_pool = await aiopg.create_pool(**DB_CONFIG)
-                        logger.info("[DUBLICATE_DETECTOR] Пул соединений с БД успешно создан")
-                    except Exception as e:
-                        logger.error(f"[DUBLICATE_DETECTOR] Ошибка создания пула соединений: {e}")
-                        raise
-        return FireFeedDuplicateDetector._db_pool
+    async def get_pool(self):
+        """Получает общий пул подключений из config.py"""
+        return await get_shared_db_pool()
+    
+    async def close_pool(self):
+        """Заглушка - пул закрывается глобально"""
+        pass
     
     def _get_embedding_dimension(self) -> int:
         """Получение размерности эмбеддинга модели"""
@@ -55,7 +45,7 @@ class FireFeedDuplicateDetector:
     async def _get_embedding_by_id(self, news_id: str) -> Optional[List[float]]:
         """Получение существующего эмбеддинга по ID новости"""
         try:
-            pool = await self._initialize_db_pool()
+            pool = await self.get_pool()
             async with pool.acquire() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute("""
@@ -78,8 +68,10 @@ class FireFeedDuplicateDetector:
     async def _is_duplicate_with_embedding(self, news_id: str, embedding: List[float]) -> Tuple[bool, Optional[Dict[str, Any]]]:
         """Проверка дубликата с уже имеющимся эмбеддингом"""
         try:
+            # Получаем пул один раз и передаем его в get_similar_news
+            pool = await self.get_pool()
             # Ищем похожие новости, исключая текущую
-            similar_news = await self.get_similar_news(embedding, current_news_id=news_id, limit=5)
+            similar_news = await self.get_similar_news(embedding, current_news_id=news_id, limit=5, pool=pool)
 
             # Проверяем схожесть
             for news in similar_news:
@@ -134,7 +126,7 @@ class FireFeedDuplicateDetector:
             embedding: Эмбеддинг новости
         """
         try:
-            pool = await self._initialize_db_pool()
+            pool = await self.get_pool()
             async with pool.acquire() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute("""
@@ -148,7 +140,7 @@ class FireFeedDuplicateDetector:
             logger.error(f"[DUBLICATE_DETECTOR] Ошибка при сохранении эмбеддинга для новости {news_id}: {e}")
             raise
     
-    async def get_similar_news(self, embedding: List[float], current_news_id: str = None, limit: int = 10) -> List[Dict[str, Any]]:
+    async def get_similar_news(self, embedding: List[float], current_news_id: str = None, limit: int = 10, pool=None) -> List[Dict[str, Any]]:
         """
         Поиск похожих новостей в базе данных
         
@@ -156,12 +148,16 @@ class FireFeedDuplicateDetector:
             embedding: Эмбеддинг для поиска
             current_news_id: ID текущей новости (чтобы исключить её из результатов)
             limit: Максимальное количество результатов
+            pool: Пул подключений (опционально, для повторного использования)
             
         Returns:
             Список похожих новостей
         """
         try:
-            pool = await self._initialize_db_pool()
+            # Используем переданный пул или получаем новый
+            if pool is None:
+                pool = await self.get_pool()
+                
             async with pool.acquire() as conn:
                 async with conn.cursor() as cur:
                     if current_news_id:
@@ -304,8 +300,7 @@ class FireFeedDuplicateDetector:
             Список словарей с данными новостей (news_id, original_title, original_content).
         """
         try:
-            # Используем существующий метод для получения пула
-            pool = await self._initialize_db_pool()
+            pool = await self.get_pool()
             async with pool.acquire() as conn:
                 async with conn.cursor() as cur:
                     
@@ -466,15 +461,9 @@ class FireFeedDuplicateDetector:
 
     @classmethod
     async def close_pool(cls):
-        """Закрытие пула соединений при завершении работы (классовый метод)"""
-        if cls._db_pool:
-            cls._db_pool.close()
-            await cls._db_pool.wait_closed()
-            cls._db_pool = None
-            logger.info("[DUBLICATE_DETECTOR] Пул соединений с БД закрыт")
+        """Заглушка - пул закрывается глобально"""
+        pass
 
     async def close(self):
-        """Закрытие пула соединений при завершении работы (для совместимости)"""
-        # Пул общий для всех экземпляров, поэтому не закрываем его в отдельном экземпляре
-        # Вместо этого используйте классовый метод close_pool()
+        """Заглушка - пул закрывается глобально"""
         pass

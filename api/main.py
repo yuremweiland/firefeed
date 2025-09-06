@@ -1,12 +1,18 @@
-from fastapi import FastAPI, Depends, HTTPException, Query, status, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, APIRouter, Depends, HTTPException, Query, status, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware # Для CORS
-from typing import List, Optional
+from typing import List, Optional, Union
 import sys
 import os
 import asyncio
 import json
 from datetime import datetime
 import threading
+import logging
+import traceback
+
+# Настройка логирования для этого модуля
+logger = logging.getLogger("api.news")
+logger.setLevel(logging.DEBUG) # Установите INFO в продакшене
 
 # Добавляем корень проекта и папку api в путь поиска модулей
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -70,6 +76,11 @@ def get_full_image_url(image_filename: str) -> str:
     """Формирует полный URL для изображения, добавляя HTTP_IMAGES_ROOT_DIR."""
     if not image_filename:
         return None
+    
+    # Если image_filename уже является полным URL (начинается с http(s)://), возвращаем как есть
+    if image_filename.startswith(('http://', 'https://')):
+        return image_filename
+    
     # Убираем слэш в начале HTTP_IMAGES_ROOT_DIR, если он есть, чтобы избежать дублирования
     base_url = config.HTTP_IMAGES_ROOT_DIR.rstrip('/')
     # Убираем слэш в начале image_filename, если он есть
@@ -248,6 +259,7 @@ async def get_news(
     original_language: Optional[str] = Query(None, description="Фильтр по оригинальному языку новости"),
     category_id: Optional[int] = Query(None, description="Фильтр по ID категории"),
     source_id: Optional[int] = Query(None, description="Фильтр по ID источника"),
+    telegram_published: Optional[bool] = Query(None, description="Фильтр по статусу публикации в Telegram (true/false)"),
     limit: Optional[int] = Query(50, description="Количество новостей на странице", le=100, gt=0),
     offset: Optional[int] = Query(0, description="Смещение (количество пропущенных новостей)", ge=0)
 ):
@@ -287,6 +299,17 @@ async def get_news(
                 if source_id:
                     count_query += " AND rf.source_id = %s"
                     count_params.append(source_id)
+                # Добавляем фильтр по telegram_published (исправлена таблица)
+                if telegram_published is not None:
+                    # Преобразуем в boolean если строка
+                    if isinstance(telegram_published, str):
+                        telegram_published_value = telegram_published.lower() == 'true'
+                    else:
+                        telegram_published_value = bool(telegram_published)
+                    if telegram_published_value:
+                        count_query += " AND nd.telegram_published_at IS NOT NULL"
+                    else:
+                        count_query += " AND nd.telegram_published_at IS NULL"
                 
                 await cur.execute(count_query, count_params)
                 total_count = await cur.fetchone()
@@ -343,6 +366,17 @@ async def get_news(
                 if source_id:
                     query += " AND rf.source_id = %s"
                     query_params.append(source_id)
+                # Добавляем фильтр по telegram_published (исправлена таблица)
+                if telegram_published is not None:
+                    # Преобразуем в boolean если строка
+                    if isinstance(telegram_published, str):
+                        telegram_published_value = telegram_published.lower() == 'true'
+                    else:
+                        telegram_published_value = bool(telegram_published)
+                    if telegram_published_value:
+                        query += " AND nd.telegram_published_at IS NOT NULL"
+                    else:
+                        query += " AND nd.telegram_published_at IS NULL"
                 
                 # Добавляем ORDER BY, LIMIT и OFFSET
                 query += " ORDER BY pn.published_at DESC LIMIT %s OFFSET %s"

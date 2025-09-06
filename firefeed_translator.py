@@ -32,10 +32,9 @@ class FireFeedTranslator:
         ('ru', 'de'): ('ru', 'en', 'de')
     }
 
-    def __init__(self, device="cpu", max_workers=4, max_concurrent_translations=2):
+    def __init__(self, device="cpu", max_workers=1, max_concurrent_translations=1):
         """
         Инициализация переводчика
-        
         Args:
             device: устройство для моделей (cpu/cuda)
             max_workers: максимальное количество потоков в пуле
@@ -302,6 +301,7 @@ class FireFeedTranslator:
         return False
 
     async def translate_async(self, texts, source_lang, target_lang, context_window=2):
+        print(f"[TRANSLATOR] [ASYNC] Начало translate_async для задачи")
         """Асинхронный метод перевода с использованием пула потоков"""
         loop = asyncio.get_event_loop()
         
@@ -319,6 +319,7 @@ class FireFeedTranslator:
                 
                 # Ждем его с таймаутом
                 result = await asyncio.wait_for(future, timeout=120.0)
+                print(f"[DEBUG] [TRANSLATOR] result перевода = {result}")
                 return result
             except asyncio.TimeoutError:
                 print(f"[ERROR] [TRANSLATOR] ТАЙМАУТ (120 сек) для '{source_lang}' -> '{target_lang}'!")
@@ -327,126 +328,173 @@ class FireFeedTranslator:
                 print(f"[ERROR] [TRANSLATOR] Ошибка при переводе '{source_lang}' -> '{target_lang}': {e}")
                 traceback.print_exc()
                 return texts
-
-    async def prepare_translations(self, title: str, description: str, category: str, original_lang: str) -> dict:
-        """
-        Подготавливает переводы заголовка, описания и категории на все целевые языки.
-        """
+    
+    async def prepare_translations(self, title: str, description: str, category: str, original_lang: str, callback=None, error_callback=None, task_id=None) -> dict:
+        """Подготавливает переводы заголовка, описания и категории на все целевые языки."""
         start_time = time.time()
-        print(f"[TRANSLATOR] prepare_translations начата для языка '{original_lang}'")
+        print(f"[TRANSLATOR] prepare_translations начата для языка '{original_lang}' для задачи: {task_id[:20] if task_id else 'Unknown'}")
 
-        translations = {}
-        target_languages = list(CHANNEL_IDS.keys())
-        print(f"[TRANSLATOR] Целевые языки для перевода: {target_languages}")
+        try: # Обернем всю логику в try-except для обработки ошибок и вызова error_callback
+            translations = {}
+            target_languages = list(CHANNEL_IDS.keys())
 
-        clean_title = clean_html(title)
-        clean_description = clean_html(description)
+            print(f"[TRANSLATOR] Целевые языки для перевода: {target_languages}")
+            clean_title = clean_html(title)
+            clean_description = clean_html(description)
 
-        # --- Обработка оригинального языка ---
-        if original_lang in target_languages:
-            translations[original_lang] = {
-                'title': clean_title,
-                'description': clean_description,
-                'category': category
-            }
-            print(f"[TRANSLATOR] Оригинальный язык '{original_lang}' включен в результаты без перевода.")
+            # - Обработка оригинального языка -
+            if original_lang in target_languages:
+                translations[original_lang] = {'title': clean_title, 'description': clean_description, 'category': category}
+                print(f"[TRANSLATOR] Оригинальный язык '{original_lang}' включен в результаты без перевода.")
 
-        # --- Подготовка и выполнение переводов ---
-        translation_results = {}
-        lang_pairs = []
-
-        for target_lang in target_languages:
-            if original_lang == target_lang:
-                continue
-                
-            pairs = [
-                (original_lang, target_lang, clean_title, 'title'),
-                (original_lang, target_lang, clean_description, 'description'),
-                ('en', target_lang, category, 'category')
-            ]
-            lang_pairs.append((original_lang, target_lang, pairs))
-
-        print(f"[TRANSLATOR] [BATCH] Подготовлено {len(lang_pairs)} языковых пар для перевода.")
-
-        # Выполняем переводы для каждой языковой пары
-        for i, (src_lang, tgt_lang, texts_to_process) in enumerate(lang_pairs):
-            print(f"[TRANSLATOR] [BATCH] [{i+1}/{len(lang_pairs)}] Перевод '{src_lang}' -> '{tgt_lang}': {len(texts_to_process)} текстов")
-            
-            group_start_time = time.time()
-            try:
-                # Извлекаем только тексты для перевода
-                texts_only = [text for _, _, text, _ in texts_to_process]
-                
-                # Выполняем асинхронный перевод
-                translated_texts = await self.translate_async(texts_only, src_lang, tgt_lang)
-                
-                group_duration = time.time() - group_start_time
-                print(f"[TRANSLATOR] [BATCH] [{i+1}/{len(lang_pairs)}] Группа '{src_lang}' -> '{tgt_lang}' обработана за {group_duration:.2f} сек.")
-
-                # Сохраняем результаты
-                translation_results[(src_lang, tgt_lang)] = list(zip(
-                    [field_type for _, _, _, field_type in texts_to_process],
-                    translated_texts
-                ))
-                
-            except Exception as e:
-                group_duration = time.time() - group_start_time
-                error_msg = (f"[ERROR] [TRANSLATOR] [BATCH] [{i+1}/{len(lang_pairs)}] "
-                             f"Критическая ошибка для группы '{src_lang}' -> '{tgt_lang}' "
-                             f"за {group_duration:.2f} сек: {e}")
-                print(error_msg)
-                traceback.print_exc()
-                
-                # В случае критической ошибки используем оригинальные тексты
-                translation_results[(src_lang, tgt_lang)] = [
-                    (field_type, original_text) 
-                    for _, _, original_text, field_type in texts_to_process
+            # - Подготовка и выполнение переводов -
+            translation_results = {}
+            lang_pairs = []
+            for target_lang in target_languages:
+                if original_lang == target_lang:
+                    continue
+                pairs = [
+                    (original_lang, target_lang, clean_title, 'title'),
+                    (original_lang, target_lang, clean_description, 'description'),
+                    ('en', target_lang, category, 'category') # Предполагается, что категория на английском? Или нужно тоже переводить с original_lang?
                 ]
+                lang_pairs.append((original_lang, target_lang, pairs))
 
-        # --- Компоновка финальных результатов ---
-        print("[TRANSLATOR] Начата компоновка финальных результатов переводов.")
-        
-        for target_lang in target_languages:
-            if original_lang == target_lang:
-                continue
+            print(f"[TRANSLATOR] [BATCH] Подготовлено {len(lang_pairs)} языковых пар для перевода.")
 
-            lang_translations = {}
-            valid_fields = 0
-            
-            src_lang = original_lang
-            results = translation_results.get((src_lang, target_lang), [])
-            
-            for field_type, translated_text in results:
-                if field_type == 'category':
-                    original_text = category
-                elif field_type == 'title':
-                    original_text = clean_title
-                else:  # description
-                    original_text = clean_description
+            # Выполняем переводы для каждой языковой пары
+            for i, (src_lang, tgt_lang, texts_to_process) in enumerate(lang_pairs):
+                print(f"[TRANSLATOR] [BATCH] [{i+1}/{len(lang_pairs)}] Перевод '{src_lang}' -> '{tgt_lang}': {len(texts_to_process)} текстов")
+                group_start_time = time.time()
+                try:
+                    # Извлекаем только тексты для перевода
+                    texts_only = [text for _, _, text, _ in texts_to_process]
                     
-                if self.is_broken_translation(translated_text):
-                    warn_msg = (f"[WARN] [TRANSLATOR] Битый перевод на '{target_lang}' "
-                                f"для поля '{field_type}': '{translated_text[:50]}...'")
-                    print(warn_msg)
-                    lang_translations[field_type] = original_text
-                else:
-                    lang_translations[field_type] = translated_text
-                    valid_fields += 1
-            
-            if valid_fields == 3:
-                translations[target_lang] = lang_translations
-                print(f"[TRANSLATOR] Перевод на '{target_lang}' успешно добавлен в результаты.")
-            else:
-                warn_msg = (f"[WARN] Перевод на '{target_lang}' не добавлен. "
-                            f"Корректных полей: {valid_fields}/3.")
-                print(warn_msg)
+                    # Выполняем асинхронный перевод
+                    translated_texts = await self.translate_async(texts_only, src_lang, tgt_lang)
+                    
+                    group_duration = time.time() - group_start_time
+                    print(f"[TRANSLATOR] [BATCH] [{i+1}/{len(lang_pairs)}] Группа '{src_lang}' -> '{tgt_lang}' обработана за {group_duration:.2f} сек.")
 
-        total_duration = time.time() - start_time
-        print(f"[TRANSLATOR] prepare_translations завершена за {total_duration:.2f} сек. Всего переводов: {len(translations)}")
-        
-        # --- ДОПОЛНИТЕЛЬНОЕ ЛОГИРОВАНИЕ ПЕРЕД ВОЗВРАТОМ ---
-        print(f"[TRANSLATOR] Подготовленный словарь переводов будет возвращен. Размер: {len(translations)} языков.")
-        return translations
+                    # Сохраняем результаты
+                    translation_results[(src_lang, tgt_lang)] = list(zip(
+                        [field_type for _, _, _, field_type in texts_to_process],
+                        translated_texts
+                    ))
+                except Exception as e:
+                    group_duration = time.time() - group_start_time
+                    error_msg = (
+                        f"[ERROR] [TRANSLATOR] [BATCH] [{i+1}/{len(lang_pairs)}] "
+                        f"Критическая ошибка для группы '{src_lang}' -> '{tgt_lang}' "
+                        f"за {group_duration:.2f} сек: {e}"
+                    )
+                    print(error_msg)
+                    traceback.print_exc()
+                    # В случае критической ошибки используем оригинальные тексты
+                    translation_results[(src_lang, tgt_lang)] = [
+                        (field_type, original_text) 
+                        for _, _, original_text, field_type in texts_to_process
+                    ]
+
+            # - Компоновка финальных результатов -
+            print("[TRANSLATOR] Начата компоновка финальных результатов переводов.")
+            for target_lang in target_languages:
+                if original_lang == target_lang:
+                    continue
+
+                lang_translations = {}
+                valid_fields = 0
+
+                src_lang = original_lang
+                results = translation_results.get((src_lang, target_lang), [])
+                for field_type, translated_text in results:
+                    if field_type == 'category':
+                        original_text = category
+                    elif field_type == 'title':
+                        original_text = clean_title
+                    else: # description
+                        original_text = clean_description
+
+                    if self.is_broken_translation(translated_text):
+                        warn_msg = (
+                            f"[WARN] [TRANSLATOR] Битый перевод на '{target_lang}' "
+                            f"для поля '{field_type}': '{translated_text[:50]}...'"
+                        )
+                        print(warn_msg)
+                        lang_translations[field_type] = original_text
+                    else:
+                        lang_translations[field_type] = translated_text
+                        valid_fields += 1
+
+                if valid_fields == 3:
+                    translations[target_lang] = lang_translations
+                    print(f"[TRANSLATOR] Перевод на '{target_lang}' успешно добавлен в результаты.")
+                else:
+                    warn_msg = (
+                        f"[WARN] Перевод на '{target_lang}' не добавлен. "
+                        f"Корректных полей: {valid_fields}/3."
+                    )
+                    print(warn_msg)
+
+            total_duration = time.time() - start_time
+            print(f"[TRANSLATOR] prepare_translations завершена за {total_duration:.2f} сек. Всего переводов: {len(translations)}")
+            # - ДОПОЛНИТЕЛЬНОЕ ЛОГИРОВАНИЕ ПЕРЕД ВОЗВРАТОМ -
+            print(f"[TRANSLATOR] Подготовленный словарь переводов будет возвращен. Размер: {len(translations)} языков.")
+            
+            # --- ВЫЗОВ CALLBACK ---
+            # Если передан callback, вызываем его с результатом
+            if callback:
+                print(f"[TRANSLATOR] Вызов пользовательского callback для задачи: {task_id[:20] if task_id else 'Unknown'}")
+                try:
+                    # Проверяем, является ли callback корутиной (async def)
+                    if asyncio.iscoroutinefunction(callback):
+                        await callback(translations, task_id=task_id)
+                    else:
+                        # Если это обычная функция, просто вызываем
+                        callback(translations, task_id=task_id)
+                    print(f"[TRANSLATOR] Пользовательский callback успешно выполнен для задачи: {task_id[:20] if task_id else 'Unknown'}")
+                except Exception as cb_error:
+                    print(f"[TRANSLATOR] [ERROR] Ошибка в пользовательском callback для задачи {task_id[:20] if task_id else 'Unknown'}: {cb_error}")
+                    traceback.print_exc()
+                    # Если есть error_callback, уведомляем об ошибке в callback
+                    if error_callback:
+                        try:
+                            error_data = {'error': f"Callback execution failed: {cb_error}", 'task_id': task_id}
+                            if asyncio.iscoroutinefunction(error_callback):
+                                await error_callback(error_data)
+                            else:
+                                error_callback(error_data)
+                        except Exception as ec_error:
+                            print(f"[TRANSLATOR] [ERROR] Ошибка в error_callback при обработке ошибки callback: {ec_error}")
+                            traceback.print_exc()
+            # -----------------------
+
+            return translations
+
+        except Exception as e:
+            # --- ОБРАБОТКА ОШИБОК prepare_translations ---
+            error_msg = f"[TRANSLATOR] [CRITICAL ERROR] Критическая ошибка в prepare_translations для задачи {task_id[:20] if task_id else 'Unknown'}: {e}"
+            print(error_msg)
+            traceback.print_exc()
+            
+            # Вызываем error_callback, если он передан
+            if error_callback:
+                print(f"[TRANSLATOR] Вызов пользовательского error_callback для задачи: {task_id[:20] if task_id else 'Unknown'}")
+                try:
+                    error_data = {'error': str(e), 'task_id': task_id}
+                    if asyncio.iscoroutinefunction(error_callback):
+                        await error_callback(error_data)
+                    else:
+                        error_callback(error_data)
+                    print(f"[TRANSLATOR] Пользовательский error_callback успешно выполнен для задачи: {task_id[:20] if task_id else 'Unknown'}")
+                except Exception as ec_error:
+                    print(f"[TRANSLATOR] [ERROR] Ошибка в error_callback: {ec_error}")
+                    traceback.print_exc()
+            # ---------------------------------------------
+            # Возвращаем пустой словарь в случае ошибки
+            return {}
+            # ---------------------------------------------
+
 
     def shutdown(self):
         """Корректное завершение работы переводчика"""

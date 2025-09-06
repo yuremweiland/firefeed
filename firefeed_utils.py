@@ -15,14 +15,28 @@ def clean_html(raw_html):
     if not raw_html:
         return ""
     
-    # Удаляем все теги
-    clean_text = re.sub(r'<[^>]+>', '', raw_html)
+    # Работаем с копией
+    clean_text = str(raw_html)
     
-    # Заменяем HTML-сущности (например, &amp; → &)
-    clean_text = html.unescape(clean_text)
+    # Заменяем специальные кавычки от NLP моделей
+    # Обрабатываем различные варианты: <<, < <, <  < и т.д.
+    clean_text = re.sub(r'<\s*<', '«', clean_text)
+    clean_text = re.sub(r'>\s*>', '»', clean_text)
     
-    # Удаляем лишние пробелы
-    return re.sub(r'\s+', ' ', clean_text).strip()
+    # Удаляем HTML-теги
+    clean_text = re.sub(r'<[^>]*>', '', clean_text)
+    
+    # Декодируем HTML-сущности
+    try:
+        clean_text = html.unescape(clean_text)
+    except Exception:
+        # Если html.unescape падает, оставляем как есть
+        pass
+    
+    # Нормализуем пробелы
+    clean_text = re.sub(r'\s+', ' ', clean_text)
+    
+    return clean_text.strip()
 
 async def download_and_save_image(url, news_id, save_directory=IMAGES_ROOT_DIR):
     """

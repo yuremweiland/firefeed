@@ -1,35 +1,25 @@
 import aiopg
 import asyncio
 import json
-from config import DB_CONFIG
+from config import DB_CONFIG, get_shared_db_pool
 
 class UserManager:
     def __init__(self):
-        self.pool = None
-        self._init_lock = asyncio.Lock()  # Для предотвращения race condition при инициализации
+        pass
 
-    async def init_pool(self):
-        """Инициализация пула соединений"""
-        if self.pool is None:
-            async with self._init_lock:  # Блокировка для предотвращения race condition
-                if self.pool is None:  # Проверка еще раз внутри блокировки
-                    self.pool = await aiopg.create_pool(**DB_CONFIG)
-        return self.pool
+    async def get_pool(self):
+        return await get_shared_db_pool()
 
     async def close_pool(self):
-        """Закрытие пула соединений"""
-        if self.pool:
-            self.pool.close()
-            await self.pool.wait_closed()
-            self.pool = None
+        pass
 
     # --- Асинхронные методы для работы с БД ---
 
     async def _get_user_settings(self, user_id):
         """Асинхронный метод: Возвращает все настройки пользователя."""
-        await self.init_pool()
         try:
-            async with self.pool.acquire() as conn:
+            pool = await self.get_pool()
+            async with pool.acquire() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute("SELECT subscriptions, language FROM user_preferences WHERE user_id = %s", (user_id,))
                     result = await cur.fetchone()
@@ -49,9 +39,9 @@ class UserManager:
 
     async def _save_user_settings(self, user_id, subscriptions, language):
         """Асинхронный метод: Сохраняет все настройки пользователя."""
-        await self.init_pool()
         try:
-            async with self.pool.acquire() as conn:
+            pool = await self.get_pool()
+            async with pool.acquire() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute('''
                         INSERT INTO user_preferences (user_id, subscriptions, language)
@@ -69,9 +59,9 @@ class UserManager:
 
     async def _set_user_language(self, user_id, lang_code):
         """Асинхронный метод: Устанавливает язык пользователя."""
-        await self.init_pool()
         try:
-            async with self.pool.acquire() as conn:
+            pool = await self.get_pool()
+            async with pool.acquire() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute('''
                         INSERT INTO user_preferences (user_id, language)
@@ -79,7 +69,6 @@ class UserManager:
                         ON CONFLICT (user_id) DO UPDATE SET language = EXCLUDED.language
                     ''', (user_id, lang_code))
                     
-                    # В aiopg транзакции управляются автоматически, commit не нужен
                     return True
         except Exception as e:
             print(f"[DB] [UserManager] Ошибка установки языка пользователя {user_id}: {e}")
@@ -87,9 +76,9 @@ class UserManager:
 
     async def _get_subscribers_for_category(self, category):
         """Асинхронный метод: Получает подписчиков для определенной категории."""
-        await self.init_pool()
         try:
-            async with self.pool.acquire() as conn:
+            pool = await self.get_pool()
+            async with pool.acquire() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute('''
                         SELECT user_id, subscriptions, language 
@@ -121,9 +110,9 @@ class UserManager:
 
     async def _get_all_users(self):
         """Асинхронный метод: Получаем список всех пользователей."""
-        await self.init_pool()
         try:
-            async with self.pool.acquire() as conn:
+            pool = await self.get_pool()
+            async with pool.acquire() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute("SELECT user_id FROM user_preferences")
                     user_ids = []
