@@ -1,5 +1,6 @@
-from pydantic import BaseModel
-from typing import List, Optional, Generic, TypeVar, Dict
+from pydantic import BaseModel, EmailStr, Field
+from typing import List, Optional, Generic, TypeVar, Dict, Set
+from datetime import datetime
 
 # Определяем типовой параметр для Generic
 T = TypeVar('T')
@@ -44,3 +45,87 @@ class PaginatedResponse(BaseModel, Generic[T]):
 # Модель для ответа с ошибкой (опционально, но полезно)
 class HTTPError(BaseModel):
     detail: str
+
+# --- Модели для пользователей ---
+
+class UserBase(BaseModel):
+    email: EmailStr
+    language: str = "en"
+
+class UserCreate(UserBase):
+    password: str = Field(..., min_length=8)
+
+class UserLogin(BaseModel):
+    email: EmailStr
+    password: str
+
+class UserUpdate(BaseModel):
+    email: Optional[EmailStr] = None
+    language: Optional[str] = None
+
+class UserResponse(UserBase):
+    id: int
+    is_active: bool
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+    expires_in: int
+
+class TokenData(BaseModel):
+    user_id: Optional[int] = None
+
+class PasswordResetRequest(BaseModel):
+    email: EmailStr
+
+class PasswordResetConfirm(BaseModel):
+    token: str
+    new_password: str = Field(..., min_length=8)
+
+# --- Модели для верификации пользователей ---
+
+class VerificationRequest(BaseModel):
+    """Модель для запроса верификации email пользователя."""
+    email: EmailStr
+    code: str = Field(..., min_length=6, max_length=6, description="6-digit verification code")
+
+class SuccessResponse(BaseModel):
+    """Модель для ответа об успешной операции."""
+    message: str
+
+# --- Модели для пользовательских RSS-лент ---
+
+class UserRSSFeedBase(BaseModel):
+    url: str
+    name: Optional[str] = None
+    category_id: Optional[int] = None
+    language: str = "en"
+
+class UserRSSFeedCreate(UserRSSFeedBase):
+    pass
+
+class UserRSSFeedUpdate(BaseModel):
+    name: Optional[str] = None
+    category_id: Optional[int] = None
+    is_active: Optional[bool] = None
+
+class UserRSSFeedResponse(UserRSSFeedBase):
+    id: int
+    user_id: int
+    is_active: bool
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+class UserCategoriesUpdate(BaseModel):
+    category_ids: Set[int]
+
+class UserCategoriesResponse(BaseModel):
+    category_ids: List[int]

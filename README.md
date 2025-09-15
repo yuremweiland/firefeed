@@ -42,17 +42,15 @@ User=firefeed
 Group=firefeed
 WorkingDirectory=/var/www/firefeed/data/integrations/telegram
 
-
-ExecStartPre=/bin/sh -c 'pids=$(lsof -t -i:5000); [ -n "$pids" ] && kill -9 $pids || true'
 ExecStart=/var/www/firefeed/data/integrations/telegram/run_bot.sh
-ExecStopPost=/bin/sh -c 'pids=$(lsof -t -i:5000); [ -n "$pids" ] && kill -9 $pids || true'
 
 Restart=on-failure
 RestartSec=10
 
-TimeoutStopSec=5
-KillMode=process
-KillSignal=SIGINT
+TimeoutStopSec=30
+KillMode=mixed
+KillSignal=SIGTERM
+SendSIGKILL=yes
 
 [Install]
 WantedBy=multi-user.target

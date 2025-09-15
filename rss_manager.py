@@ -387,6 +387,7 @@ class RSSManager:
                 cooldown_minutes = await self.get_feed_cooldown_minutes(rss_feed_id)
                 max_news_per_hour = await self.get_max_news_per_hour_for_feed(rss_feed_id)
                 recent_count = await self.get_recent_news_count_for_feed(rss_feed_id, cooldown_minutes)
+                print(f"[RSS] fetch_single_feed: cooldown_minutes = {cooldown_minutes}, max_news_per_hour = {max_news_per_hour}, recent_count = {recent_count}")
             except Exception as e:
                 print(f"[RSS] [ERROR] Ошибка получения параметров ленты {rss_feed_id}: {e}")
                 return local_news # Возвращаем пустой список в случае ошибки БД

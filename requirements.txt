@@ -23,3 +23,9 @@ sentence-transformers==5.1.0
 threadpoolctl==3.6.0
 nltk==3.9.1
 aiohttp==3.12.15
+psutil==7.0.0
+numpy==2.3.2
+PyJWT==2.10.1
+dnspython==2.7.0
+email-validator==2.3.0
+python-multipart==0.0.20
