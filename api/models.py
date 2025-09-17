@@ -11,7 +11,7 @@ class LanguageTranslation(BaseModel):
     content: Optional[str] = None
 
 # Модель для представления новости в API
-class NewsItem(BaseModel):
+class RSSItem(BaseModel):
     news_id: str
     original_title: str
     original_content: str
@@ -89,7 +89,7 @@ class PasswordResetConfirm(BaseModel):
 
 # --- Модели для верификации пользователей ---
 
-class VerificationRequest(BaseModel):
+class EmailVerificationRequest(BaseModel):
     """Модель для запроса верификации email пользователя."""
     email: EmailStr
     code: str = Field(..., min_length=6, max_length=6, description="6-digit verification code")

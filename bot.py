@@ -1,3 +1,4 @@
+# bot.py
 import os
 import sys
 import asyncio
@@ -21,7 +22,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 # --- Конфигурация API ---
-API_BASE_URL = "http://localhost:8000/api"
+API_BASE_URL = "http://localhost:8000/api/v1" # Обновленный базовый URL
 
 # --- Глобальные переменные ---
 USER_STATES = {}
@@ -34,15 +35,15 @@ user_manager = None
 http_session = None  # Глобальная сессия для HTTP-запросов
 
 @dataclass
-class PreparedNewsItem:
-    """Структура для хранения подготовленной новости."""
+class PreparedRSSItem: # Переименовано
+    """Структура для хранения подготовленного RSS-элемента."""
     original_data: Dict[str, Any]
     translations: Dict[str, Dict[str, str]]
     image_filename: Optional[str]
 
 # --- Функции для работы с БД ---
 async def mark_news_as_published(news_id: str):
-    """Помечает новость как опубликованную в Telegram, устанавливая текущую дату в telegram_published_at."""
+    """Помечает RSS-элемент как опубликованный в Telegram, устанавливая текущую дату в telegram_published_at."""
     try:
         # Получаем общий пул подключений
         db_pool = await get_shared_db_pool()
@@ -56,13 +57,13 @@ async def mark_news_as_published(news_id: str):
                 await cursor.execute(query, (news_id,))
                 updated_rows = cursor.rowcount
                 if updated_rows > 0:
-                    logger.info(f"Новость {news_id} помечена как опубликованная в Telegram")
+                    logger.info(f"RSS-элемент {news_id} помечен как опубликованный в Telegram")
                     return True
                 else:
-                    logger.warning(f"Не удалось пометить новость {news_id} как опубликованную (запись не найдена)")
+                    logger.warning(f"Не удалось пометить RSS-элемент {news_id} как опубликованный (запись не найдена)")
                     return False
     except Exception as e:
-        logger.error(f"Ошибка при пометке новости {news_id} как опубликованной: {e}")
+        logger.error(f"Ошибка при пометке RSS-элемента {news_id} как опубликованного: {e}")
         return False
 
 # --- Функции для работы с API ---
@@ -102,15 +103,16 @@ async def api_get(endpoint: str, params: dict = None) -> dict:
         logger.error(f"Failed to call {endpoint}: {e}")
         return {}
 
-async def get_news_list(display_language: str, **filters) -> dict:
-    """Получает список новостей."""
+# --- Обновленные функции API с новыми эндпоинтами ---
+async def get_rss_items_list(display_language: str, **filters) -> dict: # Переименовано
+    """Получает список RSS-элементов."""
     params = {"display_language": display_language, **filters}
-    return await api_get("/news/", params)
+    return await api_get("/rss-items/", params) # Обновленный эндпоинт
 
-async def get_news_by_id(news_id: str, display_language: str = "en") -> dict:
-    """Получает новость по ID."""
+async def get_rss_item_by_id(rss_item_id: str, display_language: str = "en") -> dict: # Переименовано
+    """Получает RSS-элемент по ID."""
     params = {"display_language": display_language}
-    return await api_get(f"/news/{news_id}", params)
+    return await api_get(f"/rss-items/{rss_item_id}", params) # Обновленный эндпоинт
 
 async def get_categories() -> list:
     """Получает список категорий."""
@@ -368,35 +370,35 @@ def clean_html(text):
     return html.escape(text)
 
 @retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=2, max=30))
-async def send_personal_news(bot, prepared_news_item: PreparedNewsItem):
-    """Отправляет персональные новости подписчикам."""
+async def send_personal_news(bot, prepared_rss_item: PreparedRSSItem): # Переименовано
+    """Отправляет персональные RSS-элементы подписчикам."""
     global user_manager
-    news_id = prepared_news_item.original_data.get('id')
-    logger.info(f"Отправка персональной новости: {prepared_news_item.original_data['title'][:50]}...")
-    category = prepared_news_item.original_data.get('category')
+    news_id = prepared_rss_item.original_data.get('id')
+    logger.info(f"Отправка персонального RSS-элемента: {prepared_rss_item.original_data['title'][:50]}...")
+    category = prepared_rss_item.original_data.get('category')
     if not category: 
-        logger.warning(f"Новость {news_id} не имеет категории")
+        logger.warning(f"RSS-элемент {news_id} не имеет категории")
         return
     subscribers = await user_manager.get_subscribers_for_category(category)
     if not subscribers: 
         logger.info(f"Нет подписчиков для категории {category}")
         return
-    translations_cache = prepared_news_item.translations
-    original_news_lang = prepared_news_item.original_data.get('lang', '')
+    translations_cache = prepared_rss_item.translations
+    original_news_lang = prepared_rss_item.original_data.get('lang', '') # Имя переменной изменено для ясности
     
     for i, user in enumerate(subscribers):
         try:
             user_id = user['id']
             user_lang = user.get('language_code', 'en')
             
-            # Проверяем, есть ли у новости контент на языке пользователя
+            # Проверяем, есть ли у элемента контент на языке пользователя
             title_to_send = None
             description_to_send = None
             
-            # Если язык пользователя совпадает с языком оригинала новости
+            # Если язык пользователя совпадает с языком оригинала элемента
             if user_lang == original_news_lang:
-                title_to_send = prepared_news_item.original_data['title']
-                description_to_send = prepared_news_item.original_data.get('description', '')
+                title_to_send = prepared_rss_item.original_data['title']
+                description_to_send = prepared_rss_item.original_data.get('description', '')
             # Иначе ищем перевод на язык пользователя
             elif user_lang in translations_cache and translations_cache[user_lang]:
                 translation_data = translations_cache[user_lang]
@@ -417,11 +419,11 @@ async def send_personal_news(bot, prepared_news_item: PreparedNewsItem):
             content_text = (
                 f"🔥 <b>{title_to_send}</b>\n"
                 f"\n\n{description_to_send}\n"
-                f"\nFROM: {prepared_news_item.original_data.get('source', 'Unknown Source')}\n"
+                f"\nFROM: {prepared_rss_item.original_data.get('source', 'Unknown Source')}\n"
                 f"CATEGORY: {category}\n{lang_note}\n"
-                f"⚡ <a href='{prepared_news_item.original_data.get('link', '#')}'>{READ_MORE_LABELS.get(user_lang, 'Read more')}</a>"
+                f"⚡ <a href='{prepared_rss_item.original_data.get('link', '#')}'>{READ_MORE_LABELS.get(user_lang, 'Read more')}</a>"
             )
-            image_filename = prepared_news_item.image_filename
+            image_filename = prepared_rss_item.image_filename
             logger.debug(f"send_personal_news image_filename = {image_filename}")
 
             if image_filename:
@@ -434,7 +436,7 @@ async def send_personal_news(bot, prepared_news_item: PreparedNewsItem):
 
                 caption = content_text
                 if len(caption) > 1024:
-                    base_text = f"🔥 <b>{title_to_send}</b>\nFROM: {prepared_news_item.original_data.get('source', 'Unknown Source')}\nCATEGORY: {category}{lang_note}\n⚡ <a href='{prepared_news_item.original_data.get('link', '#')}'>{READ_MORE_LABELS.get(user_lang, 'Read more')}</a>"
+                    base_text = f"🔥 <b>{title_to_send}</b>\nFROM: {prepared_rss_item.original_data.get('source', 'Unknown Source')}\nCATEGORY: {category}{lang_note}\n⚡ <a href='{prepared_rss_item.original_data.get('link', '#')}'>{READ_MORE_LABELS.get(user_lang, 'Read more')}</a>"
                     max_desc_length = 1024 - len(base_text)
                     if max_desc_length > 0:
                         truncated_desc = description_to_send[:max_desc_length-3] + "..."
@@ -462,29 +464,29 @@ async def send_personal_news(bot, prepared_news_item: PreparedNewsItem):
             if i < len(subscribers) - 1:
                 await asyncio.sleep(0.5)
         except Exception as e:
-            logger.error(f"Ошибка отправки персональной новости пользователю {user.get('id', 'Unknown ID')}: {e}")
+            logger.error(f"Ошибка отправки персонального RSS-элемента пользователю {user.get('id', 'Unknown ID')}: {e}")
 
 @retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=2, max=30))
-async def post_to_channel(bot, prepared_news_item: PreparedNewsItem):
-    """Публикует новость в Telegram-каналы."""
-    original_title = prepared_news_item.original_data['title']
-    news_id = prepared_news_item.original_data.get('id')
-    logger.info(f"Публикация новости в каналы: {original_title[:50]}...")
-    logger.debug(f"post_to_channel prepared_news_item = {prepared_news_item}")
-    original_description = prepared_news_item.original_data.get('description', '')
-    category = prepared_news_item.original_data.get('category', '')
-    original_source = prepared_news_item.original_data.get('source', 'UnknownSource')
-    original_lang = prepared_news_item.original_data['lang']
-    translations_cache = prepared_news_item.translations
+async def post_to_channel(bot, prepared_rss_item: PreparedRSSItem): # Переименовано
+    """Публикует RSS-элемент в Telegram-каналы."""
+    original_title = prepared_rss_item.original_data['title']
+    news_id = prepared_rss_item.original_data.get('id')
+    logger.info(f"Публикация RSS-элемента в каналы: {original_title[:50]}...")
+    logger.debug(f"post_to_channel prepared_rss_item = {prepared_rss_item}")
+    original_description = prepared_rss_item.original_data.get('description', '')
+    category = prepared_rss_item.original_data.get('category', '')
+    original_source = prepared_rss_item.original_data.get('source', 'UnknownSource')
+    original_lang = prepared_rss_item.original_data['lang']
+    translations_cache = prepared_rss_item.translations
     channels_list = list(CHANNEL_IDS.items())
     
     for i, (target_lang, channel_id) in enumerate(channels_list):
         try:
-            # Проверяем, есть ли у новости контент на языке канала
+            # Проверяем, есть ли у элемента контент на языке канала
             title = None
             description = None
             
-            # Если язык канала совпадает с языком оригинала новости
+            # Если язык канала совпадает с языком оригинала элемента
             if target_lang == original_lang:
                 title = original_title
                 description = original_description
@@ -508,7 +510,7 @@ async def post_to_channel(bot, prepared_news_item: PreparedNewsItem):
             if description and description.strip():
                 content_text += f"\n{description}\n"
             content_text += f"{lang_note}{hashtags}"
-            image_filename = prepared_news_item.image_filename
+            image_filename = prepared_rss_item.image_filename
             logger.debug(f"post_to_channel image_filename = {image_filename}")
 
             if image_filename:
@@ -548,40 +550,40 @@ async def post_to_channel(bot, prepared_news_item: PreparedNewsItem):
         except Exception as e:
             logger.error(f"Ошибка отправки в {channel_id}: {e}")
 
-# --- Основная логика обработки новостей ---
-async def process_news_item(context, news_item_from_api):
-    """Обрабатывает новость, полученную из API."""
+# --- Основная логика обработки RSS-элементов ---
+async def process_rss_item(context, rss_item_from_api): # Переименовано
+    """Обрабатывает RSS-элемент, полученный из API."""
     async with NEWS_PROCESSING_SEMAPHORE:
-        news_id = news_item_from_api.get('news_id')
-        logger.debug(f"Начало обработки новости {news_id} из API")
+        news_id = rss_item_from_api.get('news_id') # ID остается news_id для совместимости
+        logger.debug(f"Начало обработки RSS-элемента {news_id} из API")
 
         # Преобразуем данные из API в формат, ожидаемый остальным кодом
         original_data = {
-            'id': news_item_from_api.get('news_id'),
-            'title': news_item_from_api.get('original_title'),
-            'description': news_item_from_api.get('original_content'),
-            'category': news_item_from_api.get('category'),
-            'source': news_item_from_api.get('source'),
-            'lang': news_item_from_api.get('original_language'),
-            'link': news_item_from_api.get('source_url'),
-            'image_url': news_item_from_api.get('image_url')
+            'id': rss_item_from_api.get('news_id'),
+            'title': rss_item_from_api.get('original_title'),
+            'description': rss_item_from_api.get('original_content'),
+            'category': rss_item_from_api.get('category'),
+            'source': rss_item_from_api.get('source'),
+            'lang': rss_item_from_api.get('original_language'),
+            'link': rss_item_from_api.get('source_url'),
+            'image_url': rss_item_from_api.get('image_url')
         }
 
         logger.debug(f"original_data = {original_data}")
         
         # Обработка переводов
         translations = {}
-        if news_item_from_api.get('translations'):
-            for lang, translation_data in news_item_from_api['translations'].items():
+        if rss_item_from_api.get('translations'):
+            for lang, translation_data in rss_item_from_api['translations'].items():
                 translations[lang] = {
                     'title': translation_data.get('title', ''),
-                    'description': translation_data.get('content', ''),
+                    'description': translation_data.get('content', ''), # Контент в API теперь content
                     'category': translation_data.get('category', '')
                 }
         
-        logger.debug(f"Подготовка новости {news_id} завершена.")
+        logger.debug(f"Подготовка RSS-элемента {news_id} завершена.")
         
-        prepared_news_item = PreparedNewsItem(
+        prepared_rss_item = PreparedRSSItem( # Переименовано
             original_data=original_data,
             translations=translations,
             image_filename=original_data.get('image_url') # потому что так возвращает API
@@ -589,60 +591,60 @@ async def process_news_item(context, news_item_from_api):
         
         async def limited_post_to_channel():
             async with SEND_SEMAPHORE:
-                await post_to_channel(context.bot, prepared_news_item)
+                await post_to_channel(context.bot, prepared_rss_item) # Переименовано
 
         async def limited_send_personal_news():
             async with SEND_SEMAPHORE:
-                await send_personal_news(context.bot, prepared_news_item)
+                await send_personal_news(context.bot, prepared_rss_item) # Переименовано
 
         tasks_to_await = []
-        if news_item_from_api.get('category') in CHANNEL_CATEGORIES:
-            logger.info(f"Новость категории '{news_item_from_api.get('category')}' подходит для общего канала.")
+        if rss_item_from_api.get('category') in CHANNEL_CATEGORIES:
+            logger.info(f"RSS-элемент категории '{rss_item_from_api.get('category')}' подходит для общего канала.")
             tasks_to_await.append(limited_post_to_channel())
         else:
-            logger.info(f"Новость категории '{news_item_from_api.get('category')}' НЕ подходит для общего канала.")
+            logger.info(f"RSS-элемент категории '{rss_item_from_api.get('category')}' НЕ подходит для общего канала.")
 
         tasks_to_await.append(limited_send_personal_news())
 
         if tasks_to_await:
              await asyncio.gather(*tasks_to_await, return_exceptions=True)
 
-        # Помечаем новость как опубликованную в Telegram
+        # Помечаем RSS-элемент как опубликованный в Telegram
         await mark_news_as_published(news_id)
 
-        logger.debug(f"Завершение обработки новости {news_id}")
+        logger.debug(f"Завершение обработки RSS-элемента {news_id}")
         return True
 
-async def monitor_news_task(context: ContextTypes.DEFAULT_TYPE):
-    logger.info("Запуск задачи мониторинга новостей")
+async def monitor_news_task(context: ContextTypes.DEFAULT_TYPE): # Имя функции оставлено для совместимости, но комментарии обновлены
+    logger.info("Запуск задачи мониторинга RSS-элементов")
     try:
-        # Получаем необработанные новости через API
-        news_response = await get_news_list(display_language="en", limit=10, telegram_published="false")
-        if not isinstance(news_response, dict):
-            logger.error(f"Неверный формат ответа от API: {type(news_response)}")
+        # Получаем необработанные RSS-элементы через API
+        rss_response = await get_rss_items_list(display_language="en", limit=10, telegram_published="false") # Переименовано
+        if not isinstance(rss_response, dict):
+            logger.error(f"Неверный формат ответа от API: {type(rss_response)}")
             return
             
-        unprocessed_news_list = news_response.get("results", [])
-        logger.info(f"Получено {len(unprocessed_news_list)} новостей из API")
+        unprocessed_rss_list = rss_response.get("results", []) # Переименовано
+        logger.info(f"Получено {len(unprocessed_rss_list)} RSS-элементов из API")
         
-        if not unprocessed_news_list:
-             logger.info("Нет новостей для обработки.")
+        if not unprocessed_rss_list:
+             logger.info("Нет RSS-элементов для обработки.")
              return
 
         processing_tasks = [
-            process_news_item(context, news_item) 
-            for news_item in unprocessed_news_list
+            process_rss_item(context, rss_item) # Переименовано
+            for rss_item in unprocessed_rss_list
         ]
         
-        logger.info(f"Запуск обработки {len(processing_tasks)} новостей...")
+        logger.info(f"Запуск обработки {len(processing_tasks)} RSS-элементов...")
         try:
             await asyncio.gather(*processing_tasks, return_exceptions=True)
-            logger.info("Все новости из текущей партии обработаны.")
+            logger.info("Все RSS-элементы из текущей партии обработаны.")
         except Exception as e:
-             logger.error(f"Ошибка при обработке партии новостей: {e}")
+             logger.error(f"Ошибка при обработке партии RSS-элементов: {e}")
              
     except asyncio.TimeoutError:
-        logger.error("Таймаут получения новостей")
+        logger.error("Таймаут получения RSS-элементов")
     except Exception as e:
         logger.error(f"Ошибка в задаче мониторинга: {e}")
 
@@ -726,7 +728,7 @@ def main():
     job_queue = application.job_queue
     if job_queue:
         job_queue.run_repeating(monitor_news_task, interval=300, first=1, job_kwargs={'misfire_grace_time': 600})
-        logger.info("Зарегистрирована задача мониторинга новостей (каждые 5 минут)")
+        logger.info("Зарегистрирована задача мониторинга RSS-элементов (каждые 5 минут)")
     
     logger.info("Бот запущен в режиме Webhook")
     try:
