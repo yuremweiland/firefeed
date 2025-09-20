@@ -4,15 +4,13 @@ import os
 import sys
 import hashlib
 import secrets
+import config
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List, Set, Tuple
 import asyncio
 
 # Добавляем корень проекта в путь поиска модулей, чтобы импортировать config
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-# Импортируем настройки и shared pool
-import config
 
 async def get_db_pool():
     """Получает общий пул подключений к базе данных."""
@@ -296,9 +294,9 @@ async def get_user_categories(pool, user_id: int) -> List[Dict[str, Any]]:
                 SELECT c.id, c.name
                 FROM user_categories uc
                 JOIN categories c ON uc.category_id = c.id
-                WHERE uc.user_id = %s
+                WHERE uc.user_id = %s AND c.id != %s
                 """
-                await cur.execute(query, (user_id,))
+                await cur.execute(query, (user_id, config.USER_DEFINED_RSS_CATEGORY_ID))
                 results = []
                 async for row in cur:
                     results.append({"id": row[0], "name": row[1]})
@@ -421,7 +419,6 @@ async def delete_user_rss_feed(pool, user_id: int, feed_id: int) -> bool:
 
 # --- Функции для получения RSS-элементов ---
 
-# --- Изменено: название функции ---
 async def get_user_rss_items_list(
     pool,
     user_id: int,
@@ -533,7 +530,6 @@ async def get_user_rss_items_list(
                 print(f"[DB] Error in get_user_rss_items_list: {e}")
                 raise # Перебрасываем исключение, чтобы обработать его в API
 
-# --- Изменено: название функции ---
 async def get_user_rss_items_list_by_feed(
     pool,
     user_id: int,
@@ -720,13 +716,12 @@ async def get_rss_item_by_id_full(pool, news_id: str) -> Tuple[Optional[Tuple], 
                 print(f"[DB] Ошибка при получении RSS-элемента по ID (full): {e}")
                 return None, []
 
-# --- Добавлено: функция для получения всех новостей (перенос из main.py) ---
 async def get_all_rss_items_list(
     pool,
     display_language: str,
     original_language: Optional[str],
-    category_id: Optional[int],
-    source_id: Optional[int],
+    category_id: Optional[List[int]],
+    source_id: Optional[List[int]],
     telegram_published: Optional[bool],
     limit: int,
     offset: int
@@ -773,11 +768,21 @@ async def get_all_rss_items_list(
                     query += " AND nd.original_language = %s"
                     query_params.append(original_language)
                 if category_id:
-                    query += " AND nd.category_id = %s"
-                    query_params.append(category_id)
+                    if len(category_id) == 1:
+                        query += " AND nd.category_id = %s"
+                        query_params.append(category_id[0])
+                    else:
+                        placeholders = ','.join(['%s'] * len(category_id))
+                        query += f" AND nd.category_id IN ({placeholders})"
+                        query_params.extend(category_id)
                 if source_id:
-                    query += " AND rf.source_id = %s"
-                    query_params.append(source_id)
+                    if len(source_id) == 1:
+                        query += " AND rf.source_id = %s"
+                        query_params.append(source_id[0])
+                    else:
+                        placeholders = ','.join(['%s'] * len(source_id))
+                        query += f" AND rf.source_id IN ({placeholders})"
+                        query_params.extend(source_id)
                 # Добавляем фильтр по telegram_published
                 if telegram_published is not None:
                     # Преобразуем в boolean если строка (это делалось в main.py, переносим логику)
@@ -818,11 +823,21 @@ async def get_all_rss_items_list(
                     count_query += " AND nd.original_language = %s"
                     count_params.append(original_language)
                 if category_id:
-                    count_query += " AND nd.category_id = %s"
-                    count_params.append(category_id)
+                    if len(category_id) == 1:
+                        count_query += " AND nd.category_id = %s"
+                        count_params.append(category_id[0])
+                    else:
+                        placeholders = ','.join(['%s'] * len(category_id))
+                        count_query += f" AND nd.category_id IN ({placeholders})"
+                        count_params.extend(category_id)
                 if source_id:
-                    count_query += " AND rf.source_id = %s"
-                    count_params.append(source_id)
+                    if len(source_id) == 1:
+                        count_query += " AND rf.source_id = %s"
+                        count_params.append(source_id[0])
+                    else:
+                        placeholders = ','.join(['%s'] * len(source_id))
+                        count_query += f" AND rf.source_id IN ({placeholders})"
+                        count_params.extend(source_id)
                 # Добавляем фильтр по telegram_published для подсчета
                 if telegram_published is not None:
                      if telegram_published_value: # Используем уже вычисленное значение
@@ -842,7 +857,6 @@ async def get_all_rss_items_list(
                 print(f"[DB] Ошибка при выполнении запроса в get_all_rss_items_list: {e}")
                 raise # Перебрасываем исключение
 
-# --- Добавлено: функция для получения всех категорий (перенос из main.py) ---
 async def get_all_categories_list(pool, limit: int, offset: int) -> Tuple[int, List[Dict[str, Any]]]:
     """
     Получает список всех категорий с пагинацией.
@@ -868,33 +882,62 @@ async def get_all_categories_list(pool, limit: int, offset: int) -> Tuple[int, L
                 print(f"[DB] Ошибка при выполнении запроса в get_all_categories_list: {e}")
                 raise
 
-# --- Добавлено: функция для получения всех источников (перенос из main.py) ---
-async def get_all_sources_list(pool, limit: int, offset: int) -> Tuple[int, List[Dict[str, Any]]]:
+async def get_all_sources_list(
+    pool, 
+    limit: int, 
+    offset: int, 
+    category_id: Optional[List[int]] = None
+) -> Tuple[int, List[Dict[str, Any]]]:
     """
-    Получает список всех источников с пагинацией.
+    Получает список всех источников с пагинацией и опциональной фильтрацией по категориям.
     Возвращает кортеж (total_count, results).
     """
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:
             try:
-                # Получаем общее количество
-                await cur.execute("SELECT COUNT(*) FROM sources")
+                # Формируем базовые части запроса
+                base_query_select = """
+                    SELECT DISTINCT s.id, s.name, s.description
+                    FROM sources s
+                """
+                base_query_count = """
+                    SELECT COUNT(DISTINCT s.id)
+                    FROM sources s
+                """
+
+                # Если переданы категории, добавляем JOIN
+                if category_id:
+                    join_clause = """
+                        JOIN source_categories sc ON s.id = sc.source_id
+                        WHERE sc.category_id = ANY(%s)
+                    """
+                    full_query_select = base_query_select + join_clause + " ORDER BY s.name LIMIT %s OFFSET %s"
+                    full_query_count = base_query_count + join_clause
+                else:
+                    full_query_select = base_query_select + " ORDER BY s.name LIMIT %s OFFSET %s"
+                    full_query_count = base_query_count
+
+                # Выполняем подсчёт общего количества записей
+                await cur.execute(full_query_count, (category_id,) if category_id else ())
                 total_count_row = await cur.fetchone()
                 total_count = total_count_row[0] if total_count_row else 0
 
-                # Получаем список с пагинацией
-                query = "SELECT id, name, url FROM sources ORDER BY name LIMIT %s OFFSET %s"
-                await cur.execute(query, (limit, offset))
+                # Выполняем выборку данных с пагинацией
+                params = (category_id, limit, offset) if category_id else (limit, offset)
+                await cur.execute(full_query_select, params)
+
                 results = []
                 async for row in cur:
-                    results.append({"id": row[0], "name": row[1], "url": row[2]})
+                    results.append({
+                        "id": row[0],
+                        "name": row[1]
+                    })
 
                 return total_count, results
             except Exception as e:
                 print(f"[DB] Ошибка при выполнении запроса в get_all_sources_list: {e}")
                 raise
 
-# --- Добавлено: функция для получения последних новостей для броадкаста (перенос из main.py) ---
 async def get_recent_news_for_broadcast(pool, last_check_time: datetime) -> List[Dict[str, Any]]:
     """
     Получает список последних новостей для отправки по WebSocket.

@@ -28,12 +28,15 @@ import config  # Импортируем конфигурационный фай�
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import StreamingResponse
 import traceback
+
 # --- Настройки JWT ---
 SECRET_KEY = getattr(config, 'JWT_SECRET_KEY', 'your-secret-key-change-in-production')
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
+
 # --- OAuth2 схема ---
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
+
 # --- Middleware для принудительной установки UTF-8 ---
 class ForceUTF8ResponseMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
@@ -241,10 +244,8 @@ async def check_for_new_news():
     while True:
         await asyncio.sleep(config.NEWS_CHECK_INTERVAL_SECONDS) # Ждем указанный интервал
         try:
-            # Вызываем функцию из database.py
             news_items = await database.get_recent_news_for_broadcast(pool, last_check_time)
             if news_items:
-                # Отправляем уведомление
                 await broadcast_new_news(news_items)
             last_check_time = datetime.now()
         except Exception as e:
@@ -263,8 +264,8 @@ async def startup_event():
 async def get_news(
     display_language: str = Query(..., description="Язык, на котором отображать новости (ru, en, de, fr)"),
     original_language: Optional[str] = Query(None, description="Фильтр по оригинальному языку новости"),
-    category_id: Optional[int] = Query(None, description="Фильтр по ID категории"),
-    source_id: Optional[int] = Query(None, description="Фильтр по ID источника"),
+    category_id: Optional[List[int]] = Query(None, description="Фильтр по ID категории (можно указать несколько)"),
+    source_id: Optional[List[int]] = Query(None, description="Фильтр по ID источника (можно указать несколько)"),
     telegram_published: Optional[bool] = Query(None, description="Фильтр по статусу публикации в Telegram (true/false)"),
     limit: Optional[int] = Query(50, description="Количество новостей на странице", le=100, gt=0),
     offset: Optional[int] = Query(0, description="Смещение (количество пропущенных новостей)", ge=0)
@@ -282,7 +283,6 @@ async def get_news(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Ошибка подключения к базе данных")
 
     try:
-        # Вызов новой функции из database.py
         total_count, results, columns = await database.get_all_rss_items_list(
             pool, display_language, original_language, category_id, source_id, telegram_published, limit, offset
         )
@@ -321,7 +321,6 @@ async def get_news_by_id(rss_item_id: str):
     if pool is None:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Ошибка подключения к базе данных")
 
-    # Вызов функции из database.py
     result = await database.get_rss_item_by_id(pool, rss_item_id)
     if not result:
          raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="News item not found")
@@ -392,7 +391,6 @@ async def get_categories(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Ошибка подключения к базе данных")
 
     try:
-        # Вызов новой функции из database.py
         total_count, results = await database.get_all_categories_list(pool, limit, offset)
     except Exception as e:
         print(f"[API] Ошибка при выполнении запроса в get_categories: {e}")
@@ -404,7 +402,8 @@ async def get_categories(
 @app.get("/api/v1/sources/", summary="Получить источники новостей")
 async def get_sources(
     limit: Optional[int] = Query(100, description="Количество источников на странице", le=1000, gt=0),
-    offset: Optional[int] = Query(0, description="Смещение (количество пропущенных источников)", ge=0)
+    offset: Optional[int] = Query(0, description="Смещение (количество пропущенных источников)", ge=0),
+    category_id: Optional[List[int]] = Query(None, description="Фильтр по ID категорий")
 ):
     """
     Получить список всех уникальных источников.
@@ -415,8 +414,7 @@ async def get_sources(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Ошибка подключения к базе данных")
 
     try:
-       # Вызов новой функции из database.py
-        total_count, results = await database.get_all_sources_list(pool, limit, offset)
+        total_count, results = await database.get_all_sources_list(pool, limit, offset, category_id)
     except Exception as e:
         print(f"[API] Ошибка при выполнении запроса в get_sources: {e}")
         traceback.print_exc()
@@ -626,8 +624,10 @@ async def confirm_password_reset(request: models.PasswordResetConfirm):
     # Помечаем токен как использованный
     await database.use_password_reset_token(pool, request.token)
     return {"message": "Password successfully reset"}
+
 # --- User endpoints ---
 user_router = APIRouter(prefix="/api/v1/users", tags=["users"])
+
 @user_router.get("/me", response_model=models.UserResponse)
 async def get_current_user_profile(current_user: dict = Depends(get_current_active_user)):
     """Получение профиля текущего пользователя"""
@@ -667,7 +667,7 @@ async def delete_current_user(current_user: dict = Depends(get_current_active_us
     return
 
 # --- User Categories endpoints ---
-categories_router = APIRouter(prefix="/api/v1/user/me/categories", tags=["user_categories"])
+categories_router = APIRouter(prefix="/api/v1/users/me/categories", tags=["user_categories"])
 
 @categories_router.put("/", response_model=models.SuccessResponse)
 async def update_user_categories(
