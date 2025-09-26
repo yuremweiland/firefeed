@@ -277,6 +277,7 @@ async def get_news(
     source_id: Optional[List[int]] = Query(None, description="Фильтр по ID источника (можно указать несколько)"),
     telegram_published: Optional[bool] = Query(None, description="Фильтр по статусу публикации в Telegram (true/false)"),
     from_date: Optional[int] = Query(None, description="Фильтр по дате публикации (timestamp в миллисекундах). Возвращает новости, опубликованные после этой даты."),
+    search_phrase: Optional[str] = Query(None, description="Строка для поиска по заголовку и содержанию на языке отображения"),
     limit: Optional[int] = Query(50, description="Количество новостей на странице", le=100, gt=0),
     offset: Optional[int] = Query(0, description="Смещение (количество пропущенных новостей)", ge=0)
 ):
@@ -303,7 +304,7 @@ async def get_news(
 
     try:
         total_count, results, columns = await database.get_all_rss_items_list(
-            pool, display_language, original_language, category_id, source_id, telegram_published, from_datetime, limit, offset
+            pool, display_language, original_language, category_id, source_id, telegram_published, from_datetime, search_phrase, limit, offset
         )
     except Exception as e:
         logger.error(f"[API] Ошибка при выполнении запроса в get_news: {e}")

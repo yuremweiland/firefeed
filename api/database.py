@@ -735,6 +735,7 @@ async def get_all_rss_items_list(
     source_id: Optional[List[int]],
     telegram_published: Optional[bool],
     from_date: Optional[datetime],
+    search_phrase: Optional[str],
     limit: int,
     offset: int
 ) -> Tuple[int, List[Tuple], List[str]]:
@@ -774,6 +775,12 @@ async def get_all_rss_items_list(
                 """
                 # Добавляем параметры для языковых JOIN'ов
                 query_params = ['ru', 'en', 'de', 'fr', display_language]
+                # Подготовка шаблона поиска (если задан)
+                phrase = None
+                if search_phrase:
+                    sp = search_phrase.strip()
+                    if sp:
+                        phrase = f"%{sp}%"
 
                 # Добавляем фильтры в WHERE и соответствующие параметры
                 if original_language:
@@ -813,6 +820,11 @@ async def get_all_rss_items_list(
                     query += " AND nd.created_at > %s"
                     query_params.append(from_date)
 
+                # Добавляем поиск по фразе (в переводах для display_language, с fallback на оригинал)
+                if phrase:
+                    query += " AND ((COALESCE(nt_display.translated_title,'') || ' ' || COALESCE(nt_display.translated_content,'')) ILIKE %s OR (COALESCE(nd.original_title,'') || ' ' || COALESCE(nd.original_content,'')) ILIKE %s)"
+                    query_params.extend([phrase, phrase])
+
                 # Добавляем ORDER BY, LIMIT и OFFSET
                 query += " ORDER BY nd.created_at DESC LIMIT %s OFFSET %s"
                 query_params.append(limit)
@@ -834,6 +846,11 @@ async def get_all_rss_items_list(
                 WHERE 1=1
                 """
                 count_params = []
+                
+                # Для поиска требуется JOIN с переводами на display_language
+                if phrase:
+                    count_query = count_query.replace("WHERE 1=1", "LEFT JOIN news_translations nt_display ON nd.news_id = nt_display.news_id AND nt_display.language = %s WHERE 1=1")
+                    count_params.append(display_language)
 
                 # Добавляем те же фильтры для подсчета
                 if original_language:
@@ -867,6 +884,11 @@ async def get_all_rss_items_list(
                 if from_date is not None:
                     count_query += " AND nd.created_at > %s"
                     count_params.append(from_date)
+
+                # Добавляем поиск по фразе для подсчета
+                if phrase:
+                    count_query += " AND ((COALESCE(nt_display.translated_title,'') || ' ' || COALESCE(nt_display.translated_content,'')) ILIKE %s OR (COALESCE(nd.original_title,'') || ' ' || COALESCE(nd.original_content,'')) ILIKE %s)"
+                    count_params.extend([phrase, phrase])
 
                 await cur.execute(count_query, count_params)
                 total_count_row = await cur.fetchone()

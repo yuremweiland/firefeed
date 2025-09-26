@@ -6,6 +6,7 @@ from typing import Optional
 import logging
 import os
 from jinja2 import Environment, FileSystemLoader
+from datetime import datetime
 from config import SMTP_CONFIG
 
 # Настройка логирования
@@ -130,7 +131,7 @@ FireFeed Team
         try:
             # Загружаем и рендерим шаблон
             template = self.jinja_env.get_template(template_name)
-            return template.render(verification_code=verification_code)
+            return template.render(verification_code=verification_code, current_year=datetime.now().year)
         except Exception as e:
             logger.error(f"Failed to render template {template_name}: {str(e)}")
             # Возвращаем базовый HTML контент если шаблон не найден
@@ -138,6 +139,7 @@ FireFeed Team
     
     def _get_fallback_html_content(self, verification_code: str, language: str) -> str:
         """Возвращает базовый HTML контент если шаблон не найден"""
+        year = datetime.now().year
         if language == 'ru':
             return f"""
 <!DOCTYPE html>
@@ -167,7 +169,7 @@ FireFeed Team
         </div>
         
         <div style="text-align: center; margin-top: 30px; color: #999; font-size: 12px;">
-            <p>© 2024 FireFeed. Все права защищены.</p>
+            <p>© {year} FireFeed. Все права защищены.</p>
         </div>
     </div>
 </body>
@@ -202,7 +204,7 @@ FireFeed Team
         </div>
         
         <div style="text-align: center; margin-top: 30px; color: #999; font-size: 12px;">
-            <p>© 2024 FireFeed. Alle Rechte vorbehalten.</p>
+            <p>© {year} FireFeed. Alle Rechte vorbehalten.</p>
         </div>
     </div>
 </body>
@@ -237,7 +239,7 @@ FireFeed Team
         </div>
         
         <div style="text-align: center; margin-top: 30px; color: #999; font-size: 12px;">
-            <p>© 2024 FireFeed. All rights reserved.</p>
+            <p>© {year} FireFeed. All rights reserved.</p>
         </div>
     </div>
 </body>
