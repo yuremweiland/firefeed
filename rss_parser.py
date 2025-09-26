@@ -1,7 +1,6 @@
 import asyncio
 import signal
 import sys
-import threading
 import time
 from rss_manager import RSSManager
 from firefeed_dublicate_detector import FireFeedDuplicateDetector
@@ -24,46 +23,13 @@ class RSSParserService:
             max_workers=2,
             queue_size=30
         )
-        # --- Инициализация потока и loop'а для переводчика ---
-        self._start_translator_loop()
 
         self.rss_manager = RSSManager(translator_queue=self.translator_queue)
         self.running = True
         self.parse_task = None
-        self.translator_thread = None 
-        self.translator_thread_loop = None # Сохраняем ссылку на loop потока переводчика
         self.batch_processor_task = None
         
-    def _start_translator_loop(self):
-        """Запускает цикл очереди переводчика в отдельном потоке и сохраняет ссылку на его loop"""
-        def start_translator_loop():
-            # Создаем и устанавливаем новый event loop для этого потока
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            # Сохраняем ссылку на loop этого потока в основном объекте сервиса
-            self.translator_thread_loop = loop
-            try:
-                print("[RSS_PARSER] [TRANSLATOR_THREAD] Запуск очереди переводчика в потоке...")
-                # Запускаем очередь переводов
-                loop.run_until_complete(self.translator_queue.start())
-                print("[RSS_PARSER] [TRANSLATOR_THREAD] Очередь переводчика запущена. Цикл событий работает.")
-                # run_forever() будет работать, пока loop не будет остановлен
-                loop.run_forever() 
-                print("[RSS_PARSER] [TRANSLATOR_THREAD] Цикл событий потока переводчика остановлен.")
-            except Exception as e:
-                print(f"[RSS_PARSER] [TRANSLATOR_THREAD] Ошибка в потоке переводчика: {e}")
-                import traceback
-                traceback.print_exc()
-            finally:
-                # Важно: закрываем loop при завершении потока
-                loop.close()
-                print("[RSS_PARSER] [TRANSLATOR_THREAD] Event loop потока переводчика закрыт.")
-
-        # Создаем и запускаем поток
-        self.translator_thread = threading.Thread(target=start_translator_loop, daemon=False, name="TranslatorThread")
-        self.translator_thread.start()
-        print("[RSS_PARSER] Поток очереди переводчика запущен.")
-
+    
     async def parse_rss_task(self):
         """Периодическая задача парсинга RSS"""
         while self.running:
@@ -138,6 +104,9 @@ class RSSParserService:
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(self._signal_handler(s)))
+
+        # Запускаем очередь переводов в этом же event loop
+        await self.translator_queue.start()
 
         # Создаем задачи
         self.parse_task = asyncio.create_task(self.parse_rss_task())
@@ -237,32 +206,7 @@ class RSSParserService:
                 import traceback
                 traceback.print_exc()
 
-            # --- Остановка event loop'а потока переводчика ---
-            # Это критически важно для корректного завершения потока
-            if self.translator_thread_loop and not self.translator_thread_loop.is_closed():
-                print("[RSS_PARSER] Остановка event loop'а потока переводчика...")
-                try:
-                    # Планируем остановку loop'а в его собственном контексте
-                    asyncio.run_coroutine_threadsafe(self.translator_thread_loop.stop(), self.translator_thread_loop)
-                    # Ждем завершения потока (с таймаутом)
-                    print("[RSS_PARSER] Ожидание завершения потока переводчика...")
-                    start_wait = time.time()
-                    while self.translator_thread.is_alive() and (time.time() - start_wait) < 10:
-                        await asyncio.sleep(0.1)
-                    
-                    if self.translator_thread.is_alive():
-                        print("[RSS_PARSER] Предупреждение: Поток переводчика не завершился за 10 секунд.")
-                        # Принудительное завершение потока может быть опасно, лучше дать ему время
-                    else:
-                        print("[RSS_PARSER] Поток переводчика успешно завершен.")
-                        
-                except Exception as e:
-                    print(f"[RSS_PARSER] Ошибка при остановке loop'а потока переводчика: {e}")
-                    import traceback
-                    traceback.print_exc()
-            else:
-                 print("[RSS_PARSER] Loop потока переводчика уже закрыт или недоступен.")
-        # ------------------------------------
+            # ------------------------------------
 
         # Закрываем менеджеры (заглушки, но оставляем)
         managers_to_close = [

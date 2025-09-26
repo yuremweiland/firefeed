@@ -260,6 +260,15 @@ async def startup_event():
     print("[Startup] News checking task started")
 
 # --- Endpoints для новостей ---
+from datetime import datetime
+from typing import Optional, List
+from fastapi import Query, HTTPException, status
+import traceback
+import logging
+
+logger = logging.getLogger(__name__)
+
+# --- Endpoints для новостей ---
 @app.get("/api/v1/rss-items/", summary="Получить список новостей")
 async def get_news(
     display_language: str = Query(..., description="Язык, на котором отображать новости (ru, en, de, fr)"),
@@ -267,6 +276,7 @@ async def get_news(
     category_id: Optional[List[int]] = Query(None, description="Фильтр по ID категории (можно указать несколько)"),
     source_id: Optional[List[int]] = Query(None, description="Фильтр по ID источника (можно указать несколько)"),
     telegram_published: Optional[bool] = Query(None, description="Фильтр по статусу публикации в Telegram (true/false)"),
+    from_date: Optional[int] = Query(None, description="Фильтр по дате публикации (timestamp в миллисекундах). Возвращает новости, опубликованные после этой даты."),
     limit: Optional[int] = Query(50, description="Количество новостей на странице", le=100, gt=0),
     offset: Optional[int] = Query(0, description="Смещение (количество пропущенных новостей)", ge=0)
 ):
@@ -278,13 +288,22 @@ async def get_news(
     supported_languages = ['ru', 'en', 'de', 'fr']
     if display_language not in supported_languages:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Неподдерживаемый язык отображения. Допустимые значения: {', '.join(supported_languages)}.")
+    
+    # Преобразуем from_date из миллисекунд в datetime, если передан
+    from_datetime = None
+    if from_date is not None:
+        try:
+            from_datetime = datetime.fromtimestamp(from_date / 1000.0)
+        except (ValueError, OSError) as e:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Некорректный формат timestamp в параметре from_date")
+    
     pool = await database.get_db_pool()
     if pool is None:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Ошибка подключения к базе данных")
 
     try:
         total_count, results, columns = await database.get_all_rss_items_list(
-            pool, display_language, original_language, category_id, source_id, telegram_published, limit, offset
+            pool, display_language, original_language, category_id, source_id, telegram_published, from_datetime, limit, offset
         )
     except Exception as e:
         logger.error(f"[API] Ошибка при выполнении запроса в get_news: {e}")
@@ -380,7 +399,8 @@ async def get_news_by_id(rss_item_id: str):
 @app.get("/api/v1/categories/", summary="Получить категории новостей")
 async def get_categories(
     limit: Optional[int] = Query(100, description="Количество категорий на странице", le=1000, gt=0),
-    offset: Optional[int] = Query(0, description="Смещение (количество пропущенных категорий)", ge=0)
+    offset: Optional[int] = Query(0, description="Смещение (количество пропущенных категорий)", ge=0),
+    source_ids: Optional[List[int]] = Query(None, description="Фильтрация по ID источников")
 ):
     """
     Получить список всех уникальных категорий.
@@ -391,7 +411,7 @@ async def get_categories(
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Ошибка подключения к базе данных")
 
     try:
-        total_count, results = await database.get_all_categories_list(pool, limit, offset)
+        total_count, results = await database.get_all_categories_list(pool, limit, offset, source_ids)
     except Exception as e:
         print(f"[API] Ошибка при выполнении запроса в get_categories: {e}")
         traceback.print_exc()
@@ -669,6 +689,40 @@ async def delete_current_user(current_user: dict = Depends(get_current_active_us
 # --- User Categories endpoints ---
 categories_router = APIRouter(prefix="/api/v1/users/me/categories", tags=["user_categories"])
 
+@categories_router.get("/", response_model=models.UserCategoriesResponse)
+async def get_user_categories(
+    current_user: dict = Depends(get_current_active_user),
+    source_ids: Optional[List[int]] = Query(None, description="Фильтрация по ID источников")
+):
+    """Получение списка пользовательских категорий"""
+    pool = await database.get_db_pool()
+    if pool is None:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Database error")
+    
+    categories = await database.get_user_categories(pool, current_user["id"], source_ids)
+    return models.UserCategoriesResponse(category_ids=[cat['id'] for cat in categories])
+
+# --- User RSS Feeds endpoints ---
+rss_router = APIRouter(prefix="/api/v1/users/me/rss-feeds", tags=["user_rss_feeds"])
+@rss_router.post("/", response_model=models.UserRSSFeedResponse, status_code=status.HTTP_201_CREATED)
+async def create_user_rss_feed(feed: models.UserRSSFeedCreate, current_user: dict = Depends(get_current_active_user)):
+    """Создание пользовательской RSS-ленты"""
+    pool = await database.get_db_pool()
+    if pool is None:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Database error")
+    # Создаем RSS-ленту
+    new_feed = await database.create_user_rss_feed(
+        pool, 
+        current_user["id"], 
+        feed.url, 
+        feed.name, 
+        feed.category_id, 
+        feed.language
+    )
+    if not new_feed:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create RSS feed")
+    return models.UserRSSFeedResponse(**new_feed)
+
 @categories_router.put("/", response_model=models.SuccessResponse)
 async def update_user_categories(
     category_update: models.UserCategoriesUpdate,
@@ -703,37 +757,6 @@ async def update_user_categories(
     
     return models.SuccessResponse(message="User categories successfully updated")
 
-@categories_router.get("/", response_model=models.UserCategoriesResponse)  # Используем новую модель ответа
-async def get_user_categories(current_user: dict = Depends(get_current_active_user)):
-    """Получение списка пользовательских категорий"""
-    pool = await database.get_db_pool()
-    if pool is None:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Database error")
-    
-    categories = await database.get_user_categories(pool, current_user["id"])
-    # Возвращаем в формате {"category_ids": [...]}
-    return models.UserCategoriesResponse(category_ids=[cat['id'] for cat in categories])
-
-# --- User RSS Feeds endpoints ---
-rss_router = APIRouter(prefix="/api/v1/users/me/rss-feeds", tags=["user_rss_feeds"])
-@rss_router.post("/", response_model=models.UserRSSFeedResponse, status_code=status.HTTP_201_CREATED)
-async def create_user_rss_feed(feed: models.UserRSSFeedCreate, current_user: dict = Depends(get_current_active_user)):
-    """Создание пользовательской RSS-ленты"""
-    pool = await database.get_db_pool()
-    if pool is None:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Database error")
-    # Создаем RSS-ленту
-    new_feed = await database.create_user_rss_feed(
-        pool, 
-        current_user["id"], 
-        feed.url, 
-        feed.name, 
-        feed.category_id, 
-        feed.language
-    )
-    if not new_feed:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create RSS feed")
-    return models.UserRSSFeedResponse(**new_feed)
 @rss_router.get("/", response_model=models.PaginatedResponse[models.UserRSSFeedResponse])
 async def get_user_rss_feeds(
     limit: int = Query(50, le=100, gt=0),

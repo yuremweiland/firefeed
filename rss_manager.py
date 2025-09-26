@@ -390,6 +390,18 @@ class RSSManager:
             return 0
 
     # - ОСНОВНАЯ ЛОГИКА ПАРСИНГА -
+    def _create_translation_callbacks(self, news_id):
+        async def on_success(translations, task_id=None):
+            try:
+                await self.save_translations_to_db(news_id, translations)
+                print(f"[DB] [CALLBACK] Переводы для {str(news_id)[:20]} успешно сохранены из callback")
+            except Exception as e:
+                print(f"[DB] [CALLBACK] Ошибка сохранения переводов в callback для {str(news_id)[:20]}: {e}")
+                traceback.print_exc()
+        async def on_error(error_data):
+            print(f"[TRANSLATOR] [CALLBACK] Ошибка при подготовке переводов для {str(news_id)[:20]}: {error_data}")
+        return on_success, on_error
+
     async def fetch_single_feed(self, feed_info, headers):
         """Асинхронно парсит одну RSS-ленту и возвращает список RSS-элементов из неё.
         Перед парсингом проверяет cooldown и лимиты.
@@ -576,16 +588,21 @@ class RSSManager:
                     if self.translator_queue:
                         try:
                             print(f"[DEBUG] fetch_single_feed: Перед добавлением задачи перевода для {news_item['id'][:20]}...")
-                            # Добавляем задачу перевода в очередь
-                            await self.translator_queue.put({
-                                'news_id': news_item['id'],
-                                'title': news_item['title'],
-                                'content': news_item['description'],
-                                'source_lang': news_item['lang']
-                            })
+                            success_cb, error_cb = self._create_translation_callbacks(news_item['id'])
+                            # Добавляем задачу перевода в очередь корректным способом
+                            await self.translator_queue.add_task(
+                                title=news_item['title'],
+                                description=news_item['description'],
+                                category=news_item['category'],
+                                original_lang=news_item['lang'],
+                                callback=success_cb,
+                                error_callback=error_cb,
+                                task_id=news_item['id']
+                            )
                             print(f"[DEBUG] fetch_single_feed: Задача перевода добавлена в очередь для {news_item['id'][:20]}")
                         except Exception as e:
                             print(f"[RSS] [ERROR] Ошибка добавления задачи перевода в очередь: {e}")
+                            traceback.print_exc()
                     else:
                         print("[DEBUG] fetch_single_feed: translator_queue не предоставлена, переводы не будут обработаны.")
 
@@ -816,7 +833,7 @@ class RSSManager:
                             continue
 
                         title = data.get('title', '')
-                        description = data.get('content', '') # Используем 'content' как в API
+                        description = data.get('description', '')  # описание хранится под ключом 'description'
 
                         # Подготавливаем SQL-запрос для вставки или обновления перевода
                         insert_query = """
