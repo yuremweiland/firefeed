@@ -18,7 +18,7 @@ async def test_email():
     # Тестируем отправку на разных языках
     for language in ['en', 'ru', 'de']:
         print(f"\nТестируем отправку на языке: {language}")
-        success = send_verification_email(test_email, verification_code, language)
+        success = await send_verification_email(test_email, verification_code, language)
         if success:
             print(f"✅ Письмо на {language} успешно отправлено!")
         else:

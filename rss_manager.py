@@ -31,37 +31,6 @@ class RSSManager:
         pass
 
     # - МЕТОДЫ РАБОТЫ С БД -
-    async def get_all_feeds(self):
-        """Вспомогательный метод: Получает список ВСЕХ RSS-лент."""
-        try:
-            pool = await self.get_pool()
-            feeds = []
-            async with pool.acquire() as conn:
-                async with conn.cursor() as cur:
-                    query = """
-                    SELECT rf.*, c.name as category_name, s.name as source_name
-                    FROM rss_feeds rf
-                    JOIN sources s ON rf.source_id = s.id
-                    LEFT JOIN categories c ON rf.category_id = c.id
-                    """
-                    await cur.execute(query)
-                    async for row in cur:
-                        feeds.append({
-                            'id': row[0],
-                            'url': row[1].strip(),
-                            'name': row[2],
-                            'lang': row[3],
-                            'source_id': row[4],
-                            'category_id': row[5],
-                            'source': row[6], # s.name
-                            'category': row[7] if row[7] else 'uncategorized', # c.name
-                            'category_display': row[7] # Для совместимости, если использовалось
-                        })
-            return feeds
-        except Exception as e:
-            print(f"[DB] [RSSManager] Ошибка получения всех лент: {e}")
-            return []
-
     async def get_all_active_feeds(self):
         """Вспомогательный метод: Получает список активных RSS-лент."""
         try:
@@ -402,6 +371,33 @@ class RSSManager:
             print(f"[TRANSLATOR] [CALLBACK] Ошибка при подготовке переводов для {str(news_id)[:20]}: {error_data}")
         return on_success, on_error
 
+    async def validate_rss_feed(self, url, headers):
+        """Валидирует RSS-ленту: проверяет, что URL возвращает валидный RSS."""
+        try:
+            # Проверяем заголовки
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.head(url, headers=headers) as response:
+                    content_type = response.headers.get('Content-Type', '').lower()
+                    if 'xml' not in content_type and 'rss' not in content_type and 'atom' not in content_type:
+                        print(f"[RSS] [VALIDATE] URL {url} не является RSS (Content-Type: {content_type})")
+                        return False
+
+            # Пробуем спарсить небольшую часть
+            loop = asyncio.get_event_loop()
+            feed = await loop.run_in_executor(None, feedparser.parse, url, headers)
+            if feed.bozo:
+                print(f"[RSS] [VALIDATE] Ошибка парсинга RSS {url}: {feed.bozo_exception}")
+                return False
+            if not hasattr(feed, 'entries') or len(feed.entries) == 0:
+                print(f"[RSS] [VALIDATE] RSS {url} не содержит записей")
+                return False
+            print(f"[RSS] [VALIDATE] RSS {url} валиден, содержит {len(feed.entries)} записей")
+            return True
+        except Exception as e:
+            print(f"[RSS] [VALIDATE] Ошибка валидации RSS {url}: {e}")
+            return False
+
     async def fetch_single_feed(self, feed_info, headers):
         """Асинхронно парсит одну RSS-ленту и возвращает список RSS-элементов из неё.
         Перед парсингом проверяет cooldown и лимиты.
@@ -439,10 +435,17 @@ class RSSManager:
                     print(f"[SKIP] Лента ID {rss_feed_id} находится на кулдауне ({cooldown_minutes} мин). Прошло: {elapsed}")
                     return local_news
 
-            # Если лента прошла все проверки — парсим её
+            # Если лента прошла все проверки — валидируем и парсим её
             try:
+                print(f"[RSS] Валидация RSS ленты: {feed_info['name']} ({feed_info['url']})")
+                if not await self.validate_rss_feed(feed_info['url'], headers):
+                    print(f"[RSS] RSS лента невалидна, пропуск: {feed_info['url']}")
+                    return local_news
+
                 print(f"[RSS] Парсинг ленты: {feed_info['name']} ({feed_info['url']})")
-                feed = feedparser.parse(feed_info['url'], request_headers=headers)
+                # Парсим RSS асинхронно
+                loop = asyncio.get_event_loop()
+                feed = await loop.run_in_executor(None, feedparser.parse, feed_info['url'], headers)
                 # Альтернативная попытка с использованием aiohttp для получения сырого содержимого
                 if not feed.entries and feed.bozo:
                     print(f"[RSS] [DEBUG] feedparser не смог распарсить {feed_info['url']}. Пробуем aiohttp...")
@@ -451,7 +454,9 @@ class RSSManager:
                         async with aiohttp.ClientSession(timeout=timeout) as session:
                             async with session.get(feed_info['url'], headers=headers) as response:
                                 raw_content = await response.text()
-                                feed = feedparser.parse(raw_content)
+                                # Парсим асинхронно
+                                loop = asyncio.get_event_loop()
+                                feed = await loop.run_in_executor(None, feedparser.parse, raw_content)
                                 if feed.entries:
                                     print(f"[RSS] [DEBUG] aiohttp помог распарсить {feed_info['url']}")
                     except asyncio.TimeoutError:

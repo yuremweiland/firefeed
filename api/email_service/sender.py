@@ -1,5 +1,4 @@
-import smtplib
-import ssl
+from aiosmtplib import send
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import Optional
@@ -22,7 +21,7 @@ class EmailSender:
         template_dir = os.path.join(os.path.dirname(__file__), 'templates')
         self.jinja_env = Environment(loader=FileSystemLoader(template_dir))
         
-    def send_password_reset_email(self, to_email: str, reset_token: str, language: str = 'en') -> bool:
+    async def send_password_reset_email(self, to_email: str, reset_token: str, language: str = 'en') -> bool:
         """
         Отправляет email с ссылкой для сброса пароля
 
@@ -53,17 +52,15 @@ class EmailSender:
             message.attach(text_part)
             message.attach(html_part)
 
-            # Создаем контекст SSL
-            context = ssl.create_default_context()
-
-            # Отправляем email
-            with smtplib.SMTP_SSL(
-                self.smtp_config['server'],
-                self.smtp_config['port'],
-                context=context
-            ) as server:
-                server.login(self.sender_email, self.smtp_config['password'])
-                server.sendmail(self.sender_email, to_email, message.as_string())
+            # Отправляем email асинхронно
+            await send(
+                message,
+                hostname=self.smtp_config['server'],
+                port=self.smtp_config['port'],
+                username=self.sender_email,
+                password=self.smtp_config['password'],
+                use_tls=True
+            )
 
             logger.info(f"Password reset email sent successfully to {to_email}")
             return True
@@ -72,7 +69,7 @@ class EmailSender:
             logger.error(f"Failed to send password reset email to {to_email}: {str(e)}")
             return False
 
-    def send_verification_email(self, to_email: str, verification_code: str, language: str = 'en') -> bool:
+    async def send_verification_email(self, to_email: str, verification_code: str, language: str = 'en') -> bool:
         """
         Отправляет email с кодом подтверждения регистрации
         
@@ -103,17 +100,15 @@ class EmailSender:
             message.attach(text_part)
             message.attach(html_part)
             
-            # Создаем контекст SSL
-            context = ssl.create_default_context()
-            
-            # Отправляем email
-            with smtplib.SMTP_SSL(
-                self.smtp_config['server'], 
-                self.smtp_config['port'], 
-                context=context
-            ) as server:
-                server.login(self.sender_email, self.smtp_config['password'])
-                server.sendmail(self.sender_email, to_email, message.as_string())
+            # Отправляем email асинхронно
+            await send(
+                message,
+                hostname=self.smtp_config['server'],
+                port=self.smtp_config['port'],
+                username=self.sender_email,
+                password=self.smtp_config['password'],
+                use_tls=True
+            )
             
             logger.info(f"Verification email sent successfully to {to_email}")
             return True
@@ -491,7 +486,7 @@ FireFeed Team
 email_sender = EmailSender()
 
 # Удобная функция для отправки письма
-def send_verification_email(to_email: str, verification_code: str, language: str = 'en') -> bool:
+async def send_verification_email(to_email: str, verification_code: str, language: str = 'en') -> bool:
     """
     Удобная функция для отправки email с кодом подтверждения
 
@@ -503,9 +498,9 @@ def send_verification_email(to_email: str, verification_code: str, language: str
     Returns:
         bool: True если письмо отправлено успешно, False в случае ошибки
     """
-    return email_sender.send_verification_email(to_email, verification_code, language)
+    return await email_sender.send_verification_email(to_email, verification_code, language)
 
-def send_password_reset_email(to_email: str, reset_token: str, language: str = 'en') -> bool:
+async def send_password_reset_email(to_email: str, reset_token: str, language: str = 'en') -> bool:
     """
     Удобная функция для отправки email с ссылкой сброса пароля
 
@@ -517,4 +512,4 @@ def send_password_reset_email(to_email: str, reset_token: str, language: str = '
     Returns:
         bool: True если письмо отправлено успешно, False в случае ошибки
     """
-    return email_sender.send_password_reset_email(to_email, reset_token, language)
+    return await email_sender.send_password_reset_email(to_email, reset_token, language)

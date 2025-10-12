@@ -71,15 +71,18 @@ class FireFeedTranslator:
         print(f"[TRANSLATOR] Максимум одновременных переводов: {max_concurrent_translations}")
         print(f"[TRANSLATOR] Максимум моделей в кэше: {max_cached_models}")
 
+        # Запуск фоновой задачи для выгрузки неиспользуемых моделей
+        asyncio.create_task(self._model_cleanup_task())
+
     def _get_spacy_model(self, lang_code):
-        """Получает spacy модель для языка. Потокобезопасна."""
+        """Получает spacy модель для языка. Потокобезопасна. Использует executor для асинхронности."""
         if lang_code in self.spacy_models:
             return self.spacy_models[lang_code]
-        
+
         with self.model_load_lock:
             if lang_code in self.spacy_models:
                 return self.spacy_models[lang_code]
-            
+
             # Сопоставление языкового кода с моделью spacy
             spacy_model_map = {
                 'en': 'en_core_web_sm',
@@ -87,14 +90,16 @@ class FireFeedTranslator:
                 'de': 'de_core_news_sm',
                 'fr': 'fr_core_news_sm',
             }
-            
+
             model_name = spacy_model_map.get(lang_code)
             if not model_name:
                 print(f"[SPACY] Языковая модель для '{lang_code}' не найдена, используем 'en_core_web_sm'")
                 model_name = 'en_core_web_sm'
-            
+
             try:
-                nlp = spacy.load(model_name)
+                # Загружаем spacy модель в executor
+                future = self.executor.submit(spacy.load, model_name)
+                nlp = future.result()  # Синхронно ждем
                 self.spacy_models[lang_code] = nlp
                 print(f"[SPACY] Загружена модель для языка '{lang_code}': {model_name}")
                 return nlp
@@ -102,6 +107,18 @@ class FireFeedTranslator:
                 print(f"[SPACY] Модель '{model_name}' не найдена. Установите её командой:")
                 print(f"python -m spacy download {model_name}")
                 return None
+
+    def _preprocess_text_with_terminology(self, text, target_lang):
+        """Предварительная обработка текста: замена терминов на переводы перед переводом"""
+        if target_lang not in ['ru', 'de', 'fr', 'en']:
+            return text  # Если язык не поддерживается, возвращаем как есть
+
+        for eng_term, translations in self.terminology_dict.items():
+            if target_lang in translations:
+                translated_term = translations[target_lang]
+                if translated_term != eng_term:  # Заменяем только если перевод отличается
+                    text = re.sub(r'\b' + re.escape(eng_term) + r'\b', translated_term, text, flags=re.IGNORECASE)
+        return text
 
     def _postprocess_text(self, text, target_lang='ru'):
         """Пост-обработка переведённого текста"""
@@ -149,9 +166,11 @@ class FireFeedTranslator:
                 unique_lines.append(line)
         text = '. '.join(unique_lines)
 
-        # 7. Замена терминов (регистронезависимо)
-        for eng, translated in self.terminology_dict.items():
-            text = re.sub(r'\b' + re.escape(eng) + r'\b', translated, text, flags=re.IGNORECASE)
+        # 7. Замена терминов (регистронезависимо) - теперь только для случаев, когда перевод не сработал
+        for eng, translations in self.terminology_dict.items():
+            if target_lang in translations:
+                translated_term = translations[target_lang]
+                text = re.sub(r'\b' + re.escape(eng) + r'\b', translated_term, text, flags=re.IGNORECASE)
 
         # 8. Удаление лишних символов в конце
         text = text.strip(' .,;')
@@ -262,6 +281,34 @@ class FireFeedTranslator:
             old_key, _ = self.model_cache.popitem(last=False)
             self.tokenizer_cache.pop(old_key, None)
             print(f"[CACHE] Удалена старая модель из кэша: {old_key}")
+
+    def _unload_unused_models(self):
+        """Выгрузка моделей, не использовавшихся более 30 минут"""
+        current_time = time.time()
+        unused_threshold = 1800  # 30 минут
+        models_to_remove = []
+
+        for cache_key, cached in self.model_cache.items():
+            if current_time - cached.last_used > unused_threshold:
+                models_to_remove.append(cache_key)
+
+        for cache_key in models_to_remove:
+            del self.model_cache[cache_key]
+            self.tokenizer_cache.pop(cache_key, None)
+            print(f"[MEMORY] Выгружена неиспользуемая модель: {cache_key}")
+
+        if models_to_remove:
+            gc.collect()
+            print(f"[MEMORY] Выгружено {len(models_to_remove)} неиспользуемых моделей")
+
+    async def _model_cleanup_task(self):
+        """Фоновая задача для периодической выгрузки неиспользуемых моделей"""
+        while True:
+            await asyncio.sleep(600)  # Каждые 10 минут
+            try:
+                self._unload_unused_models()
+            except Exception as e:
+                print(f"[MEMORY] Ошибка в задаче очистки моделей: {e}")
 
     def _get_model(self, direction):
         """
@@ -374,6 +421,9 @@ class FireFeedTranslator:
             print(f"[TRANSLATOR] [{end_time:.3f}] Результат найден в кэше. Время выполнения: {end_time - start_time:.3f} сек")
             return cached_result
 
+        # Предварительная обработка: замена терминов на переводы
+        text = self._preprocess_text_with_terminology(text, target_lang)
+
         print(f"[TRANSLATOR] [{time.time():.3f}] Прямой перевод {source_lang} -> {target_lang}")
         print(f"[TRANSLATOR] [{time.time():.3f}] Токенизация текста...")
 
@@ -419,54 +469,30 @@ class FireFeedTranslator:
         except:
             return 8  # значение по умолчанию
 
-    def _translate_batch_sync(self, texts, source_lang='en', target_lang='ru', context_window=2, beam_size=None):
-        """Синхронная версия translate_batch для использования в пуле потоков"""
-        if not texts:
-            return []
-
-        print(f"[TRANSLATOR] [BATCH] Начало пакетного перевода: {source_lang} -> {target_lang}, {len(texts)} текстов")
-
-        # Используем мультиязычную модель m2m100
-        model, tokenizer = self._get_model('m2m100')
-        if model is None or tokenizer is None:
-            print(f"[TRANSLATOR] [BATCH] Модель m2m100 не найдена, возврат исходных текстов.")
-            return texts
-
-        # Используем spacy для разбиения текстов на предложения
+    def _prepare_sentences_for_batch(self, texts, source_lang):
+        """Подготавливает предложения для пакетного перевода"""
         nlp = self._get_spacy_model(source_lang)
         if nlp is None:
             # Если модель не найдена, не разбиваем
-            all_sentences = texts
-            text_indices = list(range(len(texts)))
-            sentence_counts = [1] * len(texts)
-        else:
-            all_sentences = []
-            text_indices = []
-            sentence_counts = []
-            for i, text in enumerate(texts):
-                doc = nlp(text)
-                sentences = [sent.text.strip() for sent in doc.sents]
-                sentence_counts.append(len(sentences))
-                all_sentences.extend(sentences)
-                text_indices.extend([i] * len(sentences))
+            return texts, list(range(len(texts))), [1] * len(texts)
 
-        if not all_sentences:
-            return texts
+        all_sentences = []
+        text_indices = []
+        sentence_counts = []
+        for i, text in enumerate(texts):
+            doc = nlp(text)
+            sentences = [sent.text.strip() for sent in doc.sents]
+            sentence_counts.append(len(sentences))
+            all_sentences.extend(sentences)
+            text_indices.extend([i] * len(sentences))
+        return all_sentences, text_indices, sentence_counts
 
-        print(f"[TRANSLATOR] [BATCH] Всего предложений для перевода: {len(all_sentences)}")
-
-        # Переводим все предложения пакетно
-        print(f"[TRANSLATOR] [BATCH] Используемое устройство: {self.device}")
-
-        # Определяем оптимальный размер батча
-        batch_size = self._get_optimal_batch_size()
-        print(f"[TRANSLATOR] [BATCH] Оптимальный размер батча: {batch_size}")
-
+    def _translate_sentence_batches(self, sentences, model, tokenizer, source_lang, target_lang, batch_size, beam_size):
+        """Переводит батчи предложений"""
         translated_batches = []
-
-        for i in range(0, len(all_sentences), batch_size):
-            batch_sentences = all_sentences[i:i + batch_size]
-            print(f"[TRANSLATOR] [BATCH] Перевод батча {i//batch_size + 1}/{(len(all_sentences)-1)//batch_size + 1}: {len(batch_sentences)} предложений")
+        for i in range(0, len(sentences), batch_size):
+            batch_sentences = sentences[i:i + batch_size]
+            print(f"[TRANSLATOR] [BATCH] Перевод батча {i//batch_size + 1}/{(len(sentences)-1)//batch_size + 1}: {len(batch_sentences)} предложений")
 
             # Токенизация с указанием исходного и целевого языков
             batch_tokenized = [tokenizer(text, src_lang=source_lang, tgt_lang=target_lang)['input_ids'] for text in batch_sentences]
@@ -485,13 +511,13 @@ class FireFeedTranslator:
                 tokenizer.convert_tokens_to_string(res.hypotheses[0])
                 for res in results
             ]
-
             translated_batches.extend(batch_translations)
+        return translated_batches
 
-        # Группируем переводы по исходным текстам
+    def _assemble_translated_texts(self, texts, translated_batches, sentence_counts, target_lang):
+        """Собирает переведенные тексты из батчей"""
         result_texts = [''] * len(texts)
         current_pos = 0
-
         for i, (text, sent_count) in enumerate(zip(texts, sentence_counts)):
             if sent_count > 0:
                 translated_sentences = translated_batches[current_pos:current_pos + sent_count]
@@ -501,9 +527,42 @@ class FireFeedTranslator:
                 result_texts[i] = result_text
                 current_pos += sent_count
             else:
-                result_texts[i] = text # Пустой текст остается пустым
+                result_texts[i] = text  # Пустой текст остается пустым
+        return [clean_html(text) for text in result_texts]
 
-        cleaned_results = [clean_html(text) for text in result_texts]
+    def _translate_batch_sync(self, texts, source_lang='en', target_lang='ru', context_window=2, beam_size=None):
+        """Синхронная версия translate_batch для использования в пуле потоков"""
+        if not texts:
+            return []
+
+        print(f"[TRANSLATOR] [BATCH] Начало пакетного перевода: {source_lang} -> {target_lang}, {len(texts)} текстов")
+
+        # Предварительная обработка: замена терминов на переводы
+        texts = [self._preprocess_text_with_terminology(t, target_lang) for t in texts]
+
+        # Используем мультиязычную модель m2m100
+        model, tokenizer = self._get_model('m2m100')
+        if model is None or tokenizer is None:
+            print(f"[TRANSLATOR] [BATCH] Модель m2m100 не найдена, возврат исходных текстов.")
+            return texts
+
+        # Подготавливаем предложения
+        all_sentences, text_indices, sentence_counts = self._prepare_sentences_for_batch(texts, source_lang)
+        if not all_sentences:
+            return texts
+
+        print(f"[TRANSLATOR] [BATCH] Всего предложений для перевода: {len(all_sentences)}")
+        print(f"[TRANSLATOR] [BATCH] Используемое устройство: {self.device}")
+
+        # Определяем оптимальный размер батча
+        batch_size = self._get_optimal_batch_size()
+        print(f"[TRANSLATOR] [BATCH] Оптимальный размер батча: {batch_size}")
+
+        # Переводим предложения батчами
+        translated_batches = self._translate_sentence_batches(all_sentences, model, tokenizer, source_lang, target_lang, batch_size, beam_size)
+
+        # Собираем результаты
+        cleaned_results = self._assemble_translated_texts(texts, translated_batches, sentence_counts, target_lang)
         print(f"[TRANSLATOR] [BATCH] Пакетный перевод завершен. Переведено {len(cleaned_results)} текстов")
         return cleaned_results
 

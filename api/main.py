@@ -560,7 +560,7 @@ async def register_user(user: models.UserCreate):
                 raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create verification code")
     
     # Отправляем email с кодом подтверждения
-    email_sent = send_verification_email(user.email, verification_code, user.language)
+    email_sent = await send_verification_email(user.email, verification_code, user.language)
     if not email_sent:
         # Если email не отправился, удаляем пользователя и возвращаем ошибку
         await database.delete_user(pool, new_user['id'])
@@ -669,7 +669,7 @@ async def request_password_reset(request: models.PasswordResetRequest):
     if not success:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create reset token")
     # Отправляем email с ссылкой на сброс пароля
-    email_sent = send_password_reset_email(request.email, token, user.get("language", "en"))
+    email_sent = await send_password_reset_email(request.email, token, user.get("language", "en"))
     if not email_sent:
         # Если email не отправился, удаляем токен и возвращаем ошибку
         await database.delete_password_reset_token(pool, token)
@@ -881,34 +881,6 @@ async def delete_user_rss_feed(feed_id: int, current_user: dict = Depends(get_cu
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="RSS feed not found")
     return
 
-# --- Healthcheck endpoint ---
-@app.get("/api/v1/health", summary="Проверка состояния API")
-async def health_check():
-    """Проверяет, запущено ли API и доступна ли БД."""
-    try:
-        pool = await database.get_db_pool()
-        if pool:
-            db_status = "ok"
-            # Получаем информацию о пуле подключений
-            pool_total = pool.size  # Общее количество подключений в пуле
-            pool_free = pool.freesize  # Количество свободных подключений
-        else:
-            db_status = "error"
-            pool_total = None
-            pool_free = None
-    except Exception as e:
-        print(f"[Health Check] Ошибка при проверке БД: {e}")
-        db_status = "error"
-        pool_total = None
-        pool_free = None
-    return {
-        "status": "ok" if db_status == "ok" else "error", 
-        "database": db_status,
-        "database_pool": {
-            "total_connections": pool_total,
-            "free_connections": pool_free
-        } if pool_total is not None else None
-    }
 # --- Подключение роутеров ---
 app.include_router(auth_router)
 app.include_router(user_router)

@@ -29,3 +29,4 @@ PyJWT==2.10.1
 dnspython==2.7.0
 email-validator==2.3.0
 python-multipart==0.0.20
+aiosmtplib==3.0.2
