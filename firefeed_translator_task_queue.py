@@ -62,14 +62,13 @@ class FireFeedTranslatorTaskQueue:
                 if not self.queue.empty():
                     self.queue.task_done()
     
-    async def add_task(self, title, description, category, original_lang, 
-                      callback=None, error_callback=None, task_id=None):
+    async def add_task(self, title, description, original_lang,
+                       callback=None, error_callback=None, task_id=None):
         """Добавление задачи перевода в очередь"""
         task = {
             'data': {
                 'title': title,
                 'description': description,
-                'category': category,
                 'original_lang': original_lang
             },
             'callback': callback,

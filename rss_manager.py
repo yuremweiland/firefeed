@@ -593,7 +593,6 @@ class RSSManager:
                             await self.translator_queue.add_task(
                                 title=news_item['title'],
                                 description=news_item['description'],
-                                category=news_item['category'],
                                 original_lang=news_item['lang'],
                                 callback=success_cb,
                                 error_callback=error_cb,

@@ -186,9 +186,36 @@ class FireFeedTranslator:
             return True
         return False
 
+    def _check_translation_language(self, translated_text, target_lang):
+        """Проверяет, что перевод содержит символы целевого языка или не содержит чужих"""
+        try:
+            translated_lower = translated_text.lower()
+            if target_lang == 'en':
+                # Для английского: не должен содержать русские, немецкие или французские символы
+                return not bool(re.search(r'[а-яёäöüßàâäéèêëïîôöùûüÿç]', translated_lower))
+            elif target_lang == 'ru':
+                # Должен содержать русские буквы
+                return bool(re.search(r'[а-яё]', translated_lower))
+            elif target_lang == 'de':
+                # Должен содержать немецкие умлауты или специфические буквы
+                return bool(re.search(r'[äöüß]', translated_lower))
+            elif target_lang == 'fr':
+                # Должен содержать французские accents или буквы
+                return bool(re.search(r'[àâäéèêëïîôöùûüÿç]', translated_lower))
+            else:
+                # Для других языков пропускаем проверку
+                return True
+        except Exception:
+            return True  # Если ошибка — считаем, что всё ок
+
     def _semantic_check(self, original_text, translated_text):
         """Проверяет семантическое сходство оригинала и перевода с динамическим threshold"""
         try:
+            # Если перевод идентичен оригиналу, считаем плохим
+            if original_text.strip() == translated_text.strip():
+                print("[SEMANTIC] Перевод идентичен оригиналу")
+                return False
+
             if self._is_broken_translation(translated_text):
                 print("[SEMANTIC] Обнаружен битый перевод (повторы слов)")
                 return False
@@ -516,7 +543,7 @@ class FireFeedTranslator:
                 traceback.print_exc()
                 return texts
     
-    async def prepare_translations(self, title: str, description: str, category: str, original_lang: str, callback=None, error_callback=None, task_id=None) -> dict:
+    async def prepare_translations(self, title: str, description: str, original_lang: str, callback=None, error_callback=None, task_id=None) -> dict:
         """Подготавливает переводы заголовка, описания и категории на все целевые языки."""
         start_time = time.time()
         print(f"[TRANSLATOR] prepare_translations начата для языка '{original_lang}' для задачи: {task_id[:20] if task_id else 'Unknown'}")
@@ -531,7 +558,7 @@ class FireFeedTranslator:
 
             # - Обработка оригинального языка -
             if original_lang in target_languages:
-                translations[original_lang] = {'title': clean_title, 'description': clean_description, 'category': category}
+                translations[original_lang] = {'title': clean_title, 'description': clean_description}
                 print(f"[TRANSLATOR] Оригинальный язык '{original_lang}' включен в результаты без перевода.")
 
             # - Подготовка и выполнение переводов -
@@ -542,8 +569,7 @@ class FireFeedTranslator:
                     continue
                 pairs = [
                     (original_lang, target_lang, clean_title, 'title'),
-                    (original_lang, target_lang, clean_description, 'description'),
-                    ('en', target_lang, category, 'category')
+                    (original_lang, target_lang, clean_description, 'description')
                 ]
                 lang_pairs.append((original_lang, target_lang, pairs))
 
@@ -590,14 +616,11 @@ class FireFeedTranslator:
                     continue
 
                 lang_translations = {}
-                valid_fields = 0
 
                 src_lang = original_lang
                 results = translation_results.get((src_lang, target_lang), [])
                 for field_type, translated_text in results:
-                    if field_type == 'category':
-                        original_text = category
-                    elif field_type == 'title':
+                    if field_type == 'title':
                         original_text = clean_title
                     else: # description
                         original_text = clean_description
@@ -607,12 +630,13 @@ class FireFeedTranslator:
                         print(f"[TRANSLATOR] Перевод идентичен оригиналу для '{field_type}' на '{target_lang}', пропуск")
                         continue
 
-                    # Семантическая проверка только для title и description
-                    if field_type == 'category':
-                        # Для category не проверяем, всегда используем перевод
-                        lang_translations[field_type] = translated_text
-                        valid_fields += 1
-                    elif not self._semantic_check(original_text, translated_text):
+                    # Проверяем, что перевод на правильном языке (содержит символы целевого языка)
+                    if not self._check_translation_language(translated_text, target_lang):
+                        print(f"[LANG_CHECK] Перевод не на '{target_lang}' для '{field_type}': '{translated_text[:50]}...', пропуск")
+                        continue
+
+                    # Семантическая проверка для title и description
+                    if not self._semantic_check(original_text, translated_text):
                         warn_msg = (
                             f"[SEMANTIC] [TRANSLATOR] Семантическая проверка не пройдена на '{target_lang}' "
                             f"для поля '{field_type}': '{translated_text[:50]}...'"
@@ -621,26 +645,37 @@ class FireFeedTranslator:
                         # Попытка fallback: перевод с beam_size=1
                         fallback_texts = await self.translate_async([original_text], src_lang, tgt_lang, context_window=0, beam_size=1)
                         fallback_text = fallback_texts[0] if fallback_texts else ""
-                        if fallback_text and fallback_text.strip() != original_text.strip() and self._semantic_check(original_text, fallback_text):
+                        if fallback_text and fallback_text.strip() != original_text.strip() and self._check_translation_language(fallback_text, target_lang) and self._semantic_check(original_text, fallback_text):
                             print(f"[FALLBACK] Fallback перевод успешен для '{field_type}'")
                             lang_translations[field_type] = fallback_text
-                            valid_fields += 1
                         else:
                             # Не добавляем поле, если перевод неудачный
                             pass
                     else:
                         lang_translations[field_type] = translated_text
-                        valid_fields += 1
 
-                if valid_fields == 3:
+                if 'title' in lang_translations and 'description' in lang_translations:
                     translations[target_lang] = lang_translations
-                    print(f"[TRANSLATOR] Перевод на '{target_lang}' успешно добавлен в результаты.")
+                    print(f"[TRANSLATOR] Перевод на '{target_lang}' успешно добавлен в результаты ({len(lang_translations)} полей).")
                 else:
                     warn_msg = (
                         f"[WARN] Перевод на '{target_lang}' не добавлен. "
-                        f"Корректных полей: {valid_fields}/3."
+                        f"Нет заголовка или описания."
                     )
                     print(warn_msg)
+
+            # Удалить языки с одинаковыми переводами (чтобы не сохранять дубликаты битых переводов)
+            seen_titles = set()
+            to_remove = []
+            for lang, data in translations.items():
+                title = data.get('title', '')
+                if title in seen_titles:
+                    print(f"[TRANSLATOR] Удален дубликат перевода для языка '{lang}' (одинаковый title)")
+                    to_remove.append(lang)
+                else:
+                    seen_titles.add(title)
+            for lang in to_remove:
+                del translations[lang]
 
             total_duration = time.time() - start_time
             print(f"[TRANSLATOR] prepare_translations завершена за {total_duration:.2f} сек. Всего переводов: {len(translations)}")
