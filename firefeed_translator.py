@@ -16,7 +16,7 @@ from firefeed_utils import clean_html
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
-from transformers import AutoTokenizer
+from transformers import M2M100Tokenizer
 
 # Импортируем терминологический словарь
 from firefeed_translator_terminology_dict import TERMINOLOGY_DICT
@@ -270,7 +270,7 @@ class FireFeedTranslator:
     def _get_model(self, direction):
         """
         Получает модель и токенизатор для перевода.
-        direction: 'en-mul'
+        direction: 'm2m100'
         """
         cache_key = direction
         current_time = time.time()
@@ -306,16 +306,16 @@ class FireFeedTranslator:
             self._enforce_cache_limit()
 
             try:
-                if direction == 'en-mul':
-                    model_path = os.path.join(CT2_MODELS_DIR, "opus-mt-en-mul")
-                    tokenizer_path = os.path.join(CT2_MODELS_DIR, "opus-mt-en-mul_hf")
+                if direction == 'm2m100':
+                    model_path = os.path.join(CT2_MODELS_DIR, "m2m100_418M")
+                    tokenizer_path = os.path.join(CT2_MODELS_DIR, "m2m100_418M_hf")
                 else:
                     raise ValueError(f"Неизвестное направление: {direction}")
 
                 print(f"[TRANSLATOR] [{time.time():.3f}] Начало загрузки модели {model_path} через CTranslate2...")
 
                 # Загрузка токенизатора
-                tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+                tokenizer = M2M100Tokenizer.from_pretrained(tokenizer_path)
 
                 # Загрузка модели через CTranslate2
                 model = ctranslate2.Translator(
@@ -348,12 +348,10 @@ class FireFeedTranslator:
         Синхронная версия translate_with_context для использования в пуле потоков
         """
         print(f"[TRANSLATOR] [{time.time():.3f}] _translate_with_context_sync: {source_lang} -> {target_lang}, {len(texts)} предложений")
-        
-        # Для OPUS-MT нужно указать языковые токены в тексте
-        # Используем промежуточный перевод через английский
-        intermediate_texts = self._translate_batch_sync(texts, source_lang, 'en', context_window)
-        translated = self._translate_batch_sync(intermediate_texts, 'en', target_lang, context_window)
-        
+
+        # Прямой перевод с M2M100
+        translated = self._translate_batch_sync(texts, source_lang, target_lang, context_window)
+
         print(f"[TRANSLATOR] [{time.time():.3f}] _translate_with_context_sync завершена.")
         return translated
 
@@ -432,10 +430,10 @@ class FireFeedTranslator:
 
         print(f"[TRANSLATOR] [BATCH] Начало пакетного перевода: {source_lang} -> {target_lang}, {len(texts)} текстов")
 
-        # Используем мультиязычную модель en-mul
-        model, tokenizer = self._get_model('en-mul')
+        # Используем мультиязычную модель m2m100
+        model, tokenizer = self._get_model('m2m100')
         if model is None or tokenizer is None:
-            print(f"[TRANSLATOR] [BATCH] Модель en-mul не найдена, возврат исходных текстов.")
+            print(f"[TRANSLATOR] [BATCH] Модель m2m100 не найдена, возврат исходных текстов.")
             return texts
 
         # Используем spacy для разбиения текстов на предложения
@@ -474,8 +472,8 @@ class FireFeedTranslator:
             batch_sentences = all_sentences[i:i + batch_size]
             print(f"[TRANSLATOR] [BATCH] Перевод батча {i//batch_size + 1}/{(len(all_sentences)-1)//batch_size + 1}: {len(batch_sentences)} предложений")
 
-            # Токенизация с указанием целевого языка
-            batch_tokenized = [tokenizer.tokenize(text, tgt_lang=target_lang) for text in batch_sentences]
+            # Токенизация с указанием исходного и целевого языков
+            batch_tokenized = [tokenizer(text, src_lang=source_lang, tgt_lang=target_lang)['input_ids'] for text in batch_sentences]
             # Перевод через CTranslate2
             results = model.translate_batch(
                 batch_tokenized,
@@ -757,9 +755,9 @@ class FireFeedTranslator:
     def preload_popular_models(self):
         """Предзагрузка мультиязычной модели"""
         try:
-            print("[PRELOAD] Загрузка мультиязычной модели opus-mt-en-mul через CTranslate2...")
+            print("[PRELOAD] Загрузка мультиязычной модели m2m100_418M через CTranslate2...")
             # Загружаем модель
-            self._get_model('en-mul')
+            self._get_model('m2m100')
             print("[PRELOAD] Модель загружена и готова к использованию")
         except Exception as e:
             print(f"[PRELOAD] Ошибка при загрузке модели: {e}")
