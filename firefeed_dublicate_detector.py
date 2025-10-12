@@ -1,28 +1,27 @@
 import asyncio
 import json
-from sentence_transformers import SentenceTransformer
-from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 from typing import List, Tuple, Optional, Dict, Any
 import logging
 from config import DB_CONFIG, NEWS_SIMILARITY_THRESHOLD, get_shared_db_pool
+from firefeed_embeddings_processor import FireFeedEmbeddingsProcessor
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class FireFeedDuplicateDetector:
-    def __init__(self, model_name: str = 'all-MiniLM-L6-v2', similarity_threshold: float = NEWS_SIMILARITY_THRESHOLD):
+    def __init__(self, model_name: str = 'paraphrase-multilingual-mpnet-base-v2', device: str = 'cpu', similarity_threshold: float = NEWS_SIMILARITY_THRESHOLD):
         """
         Инициализация асинхронного детектора дубликатов новостей
-        
+
         Args:
             model_name: Название модели sentence-transformers
-            similarity_threshold: Порог схожести для определения дубликатов
+            device: Устройство для модели
+            similarity_threshold: Базовый порог схожести (теперь динамический)
         """
-        self.model = SentenceTransformer(model_name)
-        self.similarity_threshold = similarity_threshold
-        self.embedding_dim = self._get_embedding_dimension()
+        self.processor = FireFeedEmbeddingsProcessor(model_name, device)
+        self.similarity_threshold = similarity_threshold  # Базовый, но теперь используем динамический
     
     async def get_pool(self):
         """Получает общий пул подключений из config.py"""
@@ -32,15 +31,9 @@ class FireFeedDuplicateDetector:
         """Заглушка - пул закрывается глобально"""
         pass
     
-    def _get_embedding_dimension(self) -> int:
-        """Получение размерности эмбеддинга модели"""
-        sample_text = "test"
-        embedding = self.model.encode(sample_text)
-        return len(embedding)
-    
-    def _combine_text_fields(self, title: str, content: str) -> str:
+    def _combine_text_fields(self, title: str, content: str, lang_code: str = 'en') -> str:
         """Комбинирование заголовка и содержания для создания эмбеддинга"""
-        return f"{title} {content[:500]}"  # Ограничиваем длину для производительности
+        return self.processor.combine_texts(title, content, lang_code)
 
     async def _get_embedding_by_id(self, news_id: str) -> Optional[List[float]]:
         """Получение существующего эмбеддинга по ID новости"""
@@ -65,7 +58,7 @@ class FireFeedDuplicateDetector:
             logger.error(f"[DUBLICATE_DETECTOR] Ошибка при получении эмбеддинга для новости {news_id}: {e}")
             return None
 
-    async def _is_duplicate_with_embedding(self, news_id: str, embedding: List[float]) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    async def _is_duplicate_with_embedding(self, news_id: str, embedding: List[float], text_length: int = 0, text_type: str = 'content') -> Tuple[bool, Optional[Dict[str, Any]]]:
         """Проверка дубликата с уже имеющимся эмбеддингом"""
         try:
             # Получаем пул один раз и передаем его в get_similar_news
@@ -73,49 +66,50 @@ class FireFeedDuplicateDetector:
             # Ищем похожие новости, исключая текущую
             similar_news = await self.get_similar_news(embedding, current_news_id=news_id, limit=5, pool=pool)
 
+            # Динамический threshold
+            threshold = self.processor.get_dynamic_threshold(text_length, text_type)
+
             # Проверяем схожесть
             for news in similar_news:
                 if news['embedding'] is not None:
-                    # Преобразуем строковое представление эмбеддинга
+                    # Преобразуем эмбеддинг
                     try:
                         if isinstance(news['embedding'], str):
-                            stored_embedding_array = np.array(json.loads(news['embedding']))
+                            stored_embedding = json.loads(news['embedding'])
                         elif isinstance(news['embedding'], (list, np.ndarray)):
-                            stored_embedding_array = np.array(news['embedding'], dtype=float)
+                            stored_embedding = list(news['embedding']) if isinstance(news['embedding'], np.ndarray) else news['embedding']
                         else:
                             continue
                     except (json.JSONDecodeError, ValueError) as e:
                         logger.error(f"[DUBLICATE_DETECTOR] Ошибка преобразования эмбеддинга из БД: {e}")
                         continue
 
-                    new_embedding_array = np.array(embedding)
-                    
-                    similarity = cosine_similarity([stored_embedding_array], [new_embedding_array])[0][0]
-                    
-                    if similarity > self.similarity_threshold:
-                        logger.info(f"[DUBLICATE_DETECTOR] Найден дубликат с схожестью {similarity:.4f}")
+                    similarity = self.processor.calculate_similarity(stored_embedding, embedding)
+
+                    if similarity > threshold:
+                        logger.info(f"[DUBLICATE_DETECTOR] Найден дубликат с схожестью {similarity:.4f} (threshold: {threshold:.4f})")
                         return True, news
 
             return False, None
-            
+
         except Exception as e:
             logger.error(f"[DUBLICATE_DETECTOR] Ошибка при проверке дубликата с эмбеддингом: {e}")
             raise
     
-    async def generate_embedding(self, title: str, content: str) -> List[float]:
+    async def generate_embedding(self, title: str, content: str, lang_code: str = 'en') -> List[float]:
         """
         Генерация эмбеддинга для новости
-        
+
         Args:
             title: Заголовок новости
             content: Содержание новости
-            
+            lang_code: Код языка
+
         Returns:
             Эмбеддинг новости в виде списка float
         """
-        combined_text = self._combine_text_fields(title, content)
-        embedding = self.model.encode(combined_text, show_progress_bar=False)
-        return embedding.tolist()
+        combined_text = self._combine_text_fields(title, content, lang_code)
+        return self.processor.generate_embedding(combined_text, lang_code)
     
     async def save_embedding(self, news_id: str, embedding: List[float]):
         """
@@ -186,7 +180,7 @@ class FireFeedDuplicateDetector:
             logger.error(f"[DUBLICATE_DETECTOR] Ошибка при поиске похожих новостей: {e}")
             raise
     
-    async def is_duplicate(self, news_id: str, title: str, content: str) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    async def is_duplicate(self, news_id: str, title: str, content: str, lang_code: str = 'en') -> Tuple[bool, Optional[Dict[str, Any]]]:
         """
         Проверка, является ли новость дубликатом
 
@@ -194,43 +188,42 @@ class FireFeedDuplicateDetector:
             news_id: ID новости (для исключения из поиска)
             title: Заголовок новости
             content: Содержание новости
+            lang_code: Код языка
 
         Returns:
             Кортеж: (является_дубликатом, информация_о_дубликате)
         """
         try:
             # Генерируем эмбеддинг для новой новости
-            embedding = await self.generate_embedding(title, content)
+            embedding = await self.generate_embedding(title, content, lang_code)
 
             # Ищем похожие новости, исключая текущую
             similar_news = await self.get_similar_news(embedding, current_news_id=news_id, limit=5)
 
+            # Длина текста для динамического threshold
+            text_length = len(title) + len(content)
+            threshold = self.processor.get_dynamic_threshold(text_length, 'content')
+
             # Проверяем схожесть
             for news in similar_news:
                 if news['embedding'] is not None:
-                    # Преобразуем строковое представление эмбеддинга обратно в список float
+                    # Преобразуем эмбеддинг
                     try:
                         if isinstance(news['embedding'], str):
-                            stored_embedding_array = np.array(json.loads(news['embedding']))
+                            stored_embedding = json.loads(news['embedding'])
                         elif isinstance(news['embedding'], (list, np.ndarray)):
-                            # На случай, если данные уже в правильном формате (например, при тестировании)
-                            stored_embedding_array = np.array(news['embedding'], dtype=float)
+                            stored_embedding = list(news['embedding']) if isinstance(news['embedding'], np.ndarray) else news['embedding']
                         else:
-                            # Если формат неизвестен, пропускаем эту новость
                             logger.warning(f"[DUBLICATE_DETECTOR] Неизвестный тип данных для эмбеддинга: {type(news['embedding'])}")
                             continue
                     except (json.JSONDecodeError, ValueError) as e:
                         logger.error(f"[DUBLICATE_DETECTOR] Ошибка преобразования эмбеддинга из БД: {e}")
                         continue
 
-                    # Генерируем эмбеддинг для текущей новости (новый)
-                    new_embedding_array = np.array(embedding)
+                    similarity = self.processor.calculate_similarity(stored_embedding, embedding)
 
-                    # Вычисляем косинусное сходство
-                    similarity = cosine_similarity([stored_embedding_array], [new_embedding_array])[0][0]
-
-                    if similarity > self.similarity_threshold:
-                        logger.info(f"[DUBLICATE_DETECTOR] Найден дубликат с схожестью {similarity:.4f}")
+                    if similarity > threshold:
+                        logger.info(f"[DUBLICATE_DETECTOR] Найден дубликат с схожестью {similarity:.4f} (threshold: {threshold:.4f})")
                         return True, news
 
             return False, None
@@ -239,50 +232,53 @@ class FireFeedDuplicateDetector:
             logger.error(f"[DUBLICATE_DETECTOR] Ошибка при проверке дубликата: {e}")
             raise
     
-    async def process_news(self, news_id: str, title: str, content: str) -> bool:
+    async def process_news(self, news_id: str, title: str, content: str, lang_code: str = 'en') -> bool:
         """
         Полная обработка новости: проверка дубликата и сохранение эмбеддинга
-        
+
         Args:
             news_id: ID новости
             title: Заголовок новости
             content: Содержание новости
-            
+            lang_code: Код языка
+
         Returns:
             True если новость уникальна, False если дубликат
         """
         try:
             # Сначала проверяем, есть ли уже эмбеддинг для этой новости
             existing_embedding = await self._get_embedding_by_id(news_id)
-            
+
+            text_length = len(title) + len(content)
+
             # Если эмбеддинг уже существует, используем его для проверки дубликатов
             if existing_embedding is not None:
                 logger.debug(f"[DUBLICATE_DETECTOR] Эмбеддинг для новости {news_id} уже существует")
                 # Проверяем на дубликат, используя существующий эмбеддинг
                 is_dup, duplicate_info = await self._is_duplicate_with_embedding(
-                    news_id, existing_embedding
+                    news_id, existing_embedding, text_length, 'content'
                 )
             else:
                 # Если эмбеддинга нет, генерируем новый
                 logger.debug(f"[DUBLICATE_DETECTOR] Генерируем новый эмбеддинг для новости {news_id}")
-                embedding = await self.generate_embedding(title, content)
-                
+                embedding = await self.generate_embedding(title, content, lang_code)
+
                 # Проверяем на дубликат с новым эмбеддингом
                 is_dup, duplicate_info = await self._is_duplicate_with_embedding(
-                    news_id, embedding
+                    news_id, embedding, text_length, 'content'
                 )
-                
+
                 # Если не дубликат, сохраняем эмбеддинг
                 if not is_dup:
                     await self.save_embedding(news_id, embedding)
-            
+
             if is_dup:
                 logger.info(f"[DUBLICATE_DETECTOR] Новость {title[:50]} является дубликатом новости {duplicate_info['news_id']}")
                 return False
-            
+
             # logger.info(f"[DUBLICATE_DETECTOR] Новость {news_id} уникальна")
             return True
-            
+
         except Exception as e:
             logger.error(f"[DUBLICATE_DETECTOR] Ошибка при обработке новости {news_id}: {e}")
             raise
@@ -328,13 +324,14 @@ class FireFeedDuplicateDetector:
             logger.error(f"[BATCH_EMBEDDING] Ошибка при получении новостей без эмбеддингов: {e}")
             raise
 
-    async def process_single_news_batch(self, news_item: Dict[str, Any]) -> bool:
+    async def process_single_news_batch(self, news_item: Dict[str, Any], lang_code: str = 'en') -> bool:
         """
         Асинхронно обрабатывает одну новость в рамках пакетной обработки:
         генерирует и сохраняет эмбеддинг.
 
         Args:
             news_item: Словарь с данными новости (news_id, original_title, original_content).
+            lang_code: Код языка
 
         Returns:
             True, если эмбеддинг успешно сохранен, False в случае ошибки.
@@ -342,19 +339,19 @@ class FireFeedDuplicateDetector:
         news_id = news_item['news_id']
         title = news_item['original_title']
         content = news_item['original_content']
-        
+
         try:
             logger.debug(f"[BATCH_EMBEDDING] Начало обработки новости {news_id}...")
-            
+
             # 1. Генерируем эмбеддинг
-            embedding = await self.generate_embedding(title, content)
+            embedding = await self.generate_embedding(title, content, lang_code)
             logger.debug(f"[BATCH_EMBEDDING] Эмбеддинг для {news_id} сгенерирован.")
 
             # 2. Сохраняем эмбеддинг
             await self.save_embedding(news_id, embedding)
             logger.info(f"[BATCH_EMBEDDING] Эмбеддинг для новости {news_id} успешно сохранен.")
             return True
-                    
+
         except Exception as e:
             logger.error(f"[BATCH_EMBEDDING] Ошибка при обработке новости {news_id}: {e}", exc_info=True)
             return False

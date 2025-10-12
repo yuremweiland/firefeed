@@ -13,10 +13,8 @@ import psutil
 import ctranslate2
 from collections import OrderedDict
 from firefeed_utils import clean_html
-from sentence_transformers import SentenceTransformer
-from sklearn.metrics.pairwise import cosine_similarity
-import numpy as np
 from transformers import M2M100Tokenizer
+from firefeed_embeddings_processor import FireFeedEmbeddingsProcessor
 
 # Импортируем терминологический словарь
 from firefeed_translator_terminology_dict import TERMINOLOGY_DICT
@@ -54,10 +52,10 @@ class FireFeedTranslator:
         # Терминологический словарь (из внешнего файла)
         self.terminology_dict = TERMINOLOGY_DICT
         
-        # Загрузка модели для семантической проверки
-        print("[SEMANTIC] Загрузка модели для семантической проверки...")
-        self.semantic_model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2', device=device)
-        print("[SEMANTIC] Модель загружена")
+        # Загрузка процессора эмбеддингов для семантической проверки
+        print("[SEMANTIC] Загрузка процессора эмбеддингов для семантической проверки...")
+        self.embeddings_processor = FireFeedEmbeddingsProcessor('paraphrase-multilingual-mpnet-base-v2', device)
+        print("[SEMANTIC] Процессор загружен")
         
         # Статистика использования
         self.stats = {
@@ -208,7 +206,7 @@ class FireFeedTranslator:
         except Exception:
             return True  # Если ошибка — считаем, что всё ок
 
-    def _semantic_check(self, original_text, translated_text):
+    def _semantic_check(self, original_text, translated_text, lang_code='en'):
         """Проверяет семантическое сходство оригинала и перевода с динамическим threshold"""
         try:
             # Если перевод идентичен оригиналу, считаем плохим
@@ -220,22 +218,20 @@ class FireFeedTranslator:
                 print("[SEMANTIC] Обнаружен битый перевод (повторы слов)")
                 return False
 
-            # Динамический threshold в зависимости от длины текста
-            text_length = len(original_text.split())
-            if text_length < 5:
-                threshold = 0.4  # Мягкий для коротких текстов
-            elif text_length < 20:
-                threshold = 0.5  # Средний для средних
-            else:
-                threshold = 0.6  # Жёсткий для длинных
+            # Длина текста для динамического threshold
+            text_length = len(original_text)
+            threshold = self.embeddings_processor.get_dynamic_threshold(text_length, 'content')
 
-            # Создаём эмбеддинги
-            embeddings = self.semantic_model.encode([original_text, translated_text])
-            # Считаем косинусное сходство
-            similarity = cosine_similarity([embeddings[0]], [embeddings[1]])[0][0]
-            print(f"[SEMANTIC] similarity = {similarity}, threshold = {threshold}, original_text = {original_text}, translated_text = {translated_text}")
+            # Генерируем эмбеддинги через процессор
+            original_embedding = self.embeddings_processor.generate_embedding(original_text, lang_code)
+            translated_embedding = self.embeddings_processor.generate_embedding(translated_text, lang_code)
+
+            # Считаем сходство
+            similarity = self.embeddings_processor.calculate_similarity(original_embedding, translated_embedding)
+            print(f"[SEMANTIC] similarity = {similarity:.4f}, threshold = {threshold:.4f}, original_text = {original_text[:50]}..., translated_text = {translated_text[:50]}...")
             return similarity >= threshold
-        except Exception:
+        except Exception as e:
+            print(f"[SEMANTIC] Ошибка в семантической проверке: {e}")
             return True  # Если ошибка — считаем, что всё ок
 
     def _check_memory_usage(self):
