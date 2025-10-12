@@ -59,7 +59,7 @@ class EmailSender:
                 port=self.smtp_config['port'],
                 username=self.sender_email,
                 password=self.smtp_config['password'],
-                use_tls=True
+                start_tls=False  # Используем SSL (порт 465)
             )
 
             logger.info(f"Password reset email sent successfully to {to_email}")
@@ -107,7 +107,7 @@ class EmailSender:
                 port=self.smtp_config['port'],
                 username=self.sender_email,
                 password=self.smtp_config['password'],
-                use_tls=True
+                start_tls=False  # Используем SSL (порт 465)
             )
             
             logger.info(f"Verification email sent successfully to {to_email}")
