@@ -336,14 +336,14 @@ async def shutdown_event():
 # --- Endpoints для новостей ---
 @app.get("/api/v1/rss-items/", summary="Получить список новостей")
 async def get_news(
-    display_language: str = Query(..., description="Язык, на котором отображать новости (ru, en, de, fr)"),
+    display_language: Optional[str] = Query(None, description="Язык, на котором отображать новости (ru, en, de, fr). Если не указан, возвращаются все переводы"),
     original_language: Optional[str] = Query(None, description="Фильтр по оригинальному языку новости"),
     category_id: Optional[List[int]] = Query(None, description="Фильтр по ID категории (можно указать несколько)"),
     source_id: Optional[List[int]] = Query(None, description="Фильтр по ID источника (можно указать несколько)"),
     telegram_published: Optional[bool] = Query(None, description="Фильтр по статусу публикации в Telegram (true/false)"),
     from_date: Optional[int] = Query(None, description="Фильтр по дате публикации (timestamp в миллисекундах). Возвращает новости, опубликованные после этой даты."),
     search_phrase: Optional[str] = Query(None, alias="searchPhrase", description="Строка для поиска по заголовку и содержанию на языке отображения"),
-    include_all_translations: Optional[bool] = Query(False, description="Вернуть переводы для всех языков (дороже по ресурсам)"),
+    include_all_translations: Optional[bool] = Query(None, description="Вернуть переводы для всех языков (дороже по ресурсам). Автоматически true, если display_language не указан"),
     cursor_published_at: Optional[int] = Query(None, description="Курсор пагинации: published_at (ms) для keyset-пагинации"),
     cursor_news_id: Optional[str] = Query(None, description="Курсор пагинации: news_id для keyset-пагинации"),
     limit: Optional[int] = Query(50, description="Количество новостей на странице", le=100, gt=0),
@@ -351,12 +351,17 @@ async def get_news(
 ):
     """
     Получить список новостей, отображая заголовок и содержимое на выбранном языке (display_language).
+    Если display_language не указан, возвращаются все переводы.
     Поддерживает пагинацию через параметры limit и offset.
     Возвращает данные в формате: {"count": общее_количество, "results": [список_новостей]}
     """
     supported_languages = ['ru', 'en', 'de', 'fr']
-    if display_language not in supported_languages:
+    if display_language is not None and display_language not in supported_languages:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Неподдерживаемый язык отображения. Допустимые значения: {', '.join(supported_languages)}.")
+
+    # Если display_language не указан, автоматически включаем все переводы
+    if display_language is None:
+        include_all_translations = True
     
     # Преобразуем from_date из миллисекунд в datetime, если передан
     from_datetime = None
@@ -394,13 +399,13 @@ async def get_news(
         # Создаем словарь из результата
         row_dict = dict(zip(columns, row))
         translations = build_translations_dict(row_dict)
-        # Фильтрация: если display_language и original_language переданы и различаются,
+        # Фильтрация: если display_language указан и original_language переданы и различаются,
         # то включаем только новости с непустыми переводами на display_language
-        if display_language and original_language and display_language != original_language:
+        if display_language is not None and original_language and display_language != original_language:
             if not translations or display_language not in translations:
                 continue
         # Если указаны оба параметра, добавляем оригинальный текст в translations
-        if display_language and original_language:
+        if display_language is not None and original_language:
             translations[original_language] = {
                 "title": row_dict['original_title'],
                 "content": row_dict['original_content']

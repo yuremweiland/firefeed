@@ -142,9 +142,12 @@ async def api_get(endpoint: str, params: dict = None) -> dict:
         logger.error(f"Failed to call {endpoint}: {e}")
         return {}
 
-async def get_rss_items_list(display_language: str, **filters) -> dict:
+async def get_rss_items_list(display_language: str = None, **filters) -> dict:
     """Получает список RSS-элементов."""
-    params = {"display_language": display_language, **filters}
+    params = {}
+    if display_language is not None:
+        params["display_language"] = display_language
+    params.update(filters)
     return await api_get("/rss-items/", params)
 
 async def get_rss_item_by_id(rss_item_id: str, display_language: str = "en") -> dict:
@@ -719,7 +722,7 @@ async def monitor_news_task(context: ContextTypes.DEFAULT_TYPE):
     logger.info("Запуск задачи мониторинга RSS-элементов")
     try:
         # Получаем необработанные RSS-элементы через API
-        rss_response = await get_rss_items_list(display_language="en", limit=20, telegram_published="false")
+        rss_response = await get_rss_items_list(limit=20, telegram_published="false", include_all_translations="true")
         if not isinstance(rss_response, dict):
             logger.error(f"Неверный формат ответа от API: {type(rss_response)}")
             return
