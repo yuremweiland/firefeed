@@ -818,9 +818,11 @@ async def get_all_rss_items_list(
                 if telegram_published is not None:
                     telegram_published_value = bool(str(telegram_published).lower() == 'true') if isinstance(telegram_published, str) else bool(telegram_published)
                     if telegram_published_value:
-                        query += " AND EXISTS (SELECT 1 FROM rss_items_telegram_published rtp WHERE rtp.translation_id = nt_display.id)"
+                        # Для опубликованных: проверяем либо переводы, либо оригиналы
+                        query += " AND (EXISTS (SELECT 1 FROM rss_items_telegram_published rtp WHERE rtp.translation_id = nt_display.id) OR EXISTS (SELECT 1 FROM rss_items_telegram_published_originals rtpo WHERE rtpo.news_id = nd.news_id))"
                     else:
-                        query += " AND NOT EXISTS (SELECT 1 FROM rss_items_telegram_published rtp WHERE rtp.translation_id = nt_display.id)"
+                        # Для неопубликованных: проверяем отсутствие как переводов, так и оригиналов
+                        query += " AND (NOT EXISTS (SELECT 1 FROM rss_items_telegram_published rtp WHERE rtp.translation_id = nt_display.id) AND NOT EXISTS (SELECT 1 FROM rss_items_telegram_published_originals rtpo WHERE rtpo.news_id = nd.news_id))"
 
                 if from_date is not None:
                     query += " AND nd.created_at > %s"
@@ -878,9 +880,11 @@ async def get_all_rss_items_list(
                         count_params.extend(source_id)
                 if telegram_published is not None:
                     if telegram_published_value:
-                        count_query += " AND EXISTS (SELECT 1 FROM rss_items_telegram_published rtp WHERE rtp.translation_id = nt_display.id)"
+                        # Для опубликованных: проверяем либо переводы, либо оригиналы
+                        count_query += " AND (EXISTS (SELECT 1 FROM rss_items_telegram_published rtp WHERE rtp.translation_id = nt_display.id) OR EXISTS (SELECT 1 FROM rss_items_telegram_published_originals rtpo WHERE rtpo.news_id = nd.news_id))"
                     else:
-                        count_query += " AND NOT EXISTS (SELECT 1 FROM rss_items_telegram_published rtp WHERE rtp.translation_id = nt_display.id)"
+                        # Для неопубликованных: проверяем отсутствие как переводов, так и оригиналов
+                        count_query += " AND (NOT EXISTS (SELECT 1 FROM rss_items_telegram_published rtp WHERE rtp.translation_id = nt_display.id) AND NOT EXISTS (SELECT 1 FROM rss_items_telegram_published_originals rtpo WHERE rtpo.news_id = nd.news_id))"
                 if from_date is not None:
                     count_query += " AND nd.created_at > %s"
                     count_params.append(from_date)

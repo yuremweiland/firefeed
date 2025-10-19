@@ -10,9 +10,7 @@ import aiohttp
 from urllib.parse import urljoin, urlparse
 from firefeed_utils import download_and_save_image, extract_image_from_preview
 from config import IMAGES_ROOT_DIR, get_shared_db_pool, MAX_TOTAL_NEWS, MAX_ENTRIES_PER_FEED, MAX_CONCURRENT_FEEDS
-import mimetypes
 import traceback
-import json
 
 logger = logging.getLogger(__name__)
 

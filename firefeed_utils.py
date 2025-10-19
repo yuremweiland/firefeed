@@ -1,7 +1,6 @@
 import re
 import html
 import aiohttp
-import asyncio
 import os
 import hashlib
 import logging
@@ -123,17 +122,14 @@ async def download_and_save_image(url, news_id, save_directory=IMAGES_ROOT_DIR):
 async def extract_image_from_preview(url):
     """
     Извлекает URL изображения из web preview страницы.
-    
+
     :param url: URL страницы для парсинга
     :return: URL изображения или None
     """
     if not url:
         return None
-        
+
     try:
-        # Выполняем синхронный запрос в отдельном потоке с правильными заголовками
-        loop = asyncio.get_event_loop()
-        
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -142,25 +138,25 @@ async def extract_image_from_preview(url):
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
         }
-        
-        response = await loop.run_in_executor(
-            None, 
-            lambda: requests.get(url, headers=headers, timeout=10)
-        )
-        response.raise_for_status()
-        
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
+
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, headers=headers) as response:
+                response.raise_for_status()
+                html_content = await response.text()
+
+        soup = BeautifulSoup(html_content, 'html.parser')
+
         # Ищем og:image
         og_image = soup.find('meta', property='og:image')
         if og_image and og_image.get('content'):
             return og_image['content']
-        
+
         # Ищем twitter:image
         twitter_image = soup.find('meta', property='twitter:image')
         if twitter_image and twitter_image.get('content'):
             return twitter_image['content']
-        
+
         # Ищем первый img с src, содержащим "image" или "photo"
         image_tags = soup.find_all('img')
         for img in image_tags:
@@ -172,7 +168,7 @@ async def extract_image_from_preview(url):
                 elif src.startswith('/'):
                     return urljoin(url, src)
                 return src
-        
+
         return None
     except Exception as e:
         logger.warning(f"[WARN] Ошибка при извлечении изображения из {url}: {e}")

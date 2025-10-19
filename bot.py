@@ -65,6 +65,29 @@ async def mark_translation_as_published(translation_id: int, channel_id: int, me
         logger.error(f"Ошибка при пометке перевода {translation_id} как опубликованного: {e}")
         return False
 
+async def mark_original_as_published(news_id: str, channel_id: int, message_id: int = None):
+    """Помечает оригинальную новость как опубликованную в Telegram-канале."""
+    try:
+        # Получаем общий пул подключений
+        db_pool = await get_shared_db_pool()
+        async with db_pool.acquire() as connection:
+            async with connection.cursor() as cursor:
+                query = """
+                    INSERT INTO rss_items_telegram_published_originals
+                    (news_id, channel_id, message_id, created_at)
+                    VALUES (%s, %s, %s, NOW())
+                    ON CONFLICT (news_id, channel_id)
+                    DO UPDATE SET
+                        message_id = EXCLUDED.message_id,
+                        created_at = NOW()
+                """
+                await cursor.execute(query, (news_id, channel_id, message_id))
+                logger.info(f"Оригинальная новость {news_id} помечена как опубликованная в канале {channel_id}")
+                return True
+    except Exception as e:
+        logger.error(f"Ошибка при пометке оригинальной новости {news_id} как опубликованной: {e}")
+        return False
+
 async def get_translation_id(news_id: str, language: str) -> int:
     """Получает ID перевода из таблицы news_translations."""
     try:
@@ -562,6 +585,7 @@ async def post_to_channel(bot, prepared_rss_item: PreparedRSSItem):
                     continue
             else:
                 # Нет перевода, пропускаем
+                logger.debug(f"Нет перевода для {news_id} на {target_lang}, пропускаем публикацию")
                 continue
             hashtags = f"\n#{category} #{original_source}"
             content_text = f"<b>{title}</b>\n"
@@ -611,9 +635,13 @@ async def post_to_channel(bot, prepared_rss_item: PreparedRSSItem):
                     logger.error(f"Ошибка отправки сообщения в канал {channel_id}: {e}")
                     continue
 
-            # Помечаем перевод как опубликованный (только если это был перевод, не оригинал)
+            # Помечаем публикацию в БД
             if translation_id:
+                # Это перевод
                 await mark_translation_as_published(translation_id, channel_id, message_id)
+            else:
+                # Это оригинальная новость
+                await mark_original_as_published(news_id, channel_id, message_id)
 
             logger.info(f"Опубликовано в {channel_id}: {title[:50]}...")
             # Не выходим, продолжаем для других каналов, где есть переводы
