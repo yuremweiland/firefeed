@@ -1,0 +1,42 @@
+version: '3.8'
+
+services:
+  firefeed-api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - DB_HOST=host.docker.internal  # Или IP хоста, если БД на хосте
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+      - DB_PORT=5432
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+      - BOT_TOKEN=${BOT_TOKEN}
+      - SMTP_SERVER=${SMTP_SERVER}
+      - SMTP_PORT=465
+      - SMTP_EMAIL=${SMTP_EMAIL}
+      - SMTP_PASSWORD=${SMTP_PASSWORD}
+      - WEBHOOK_LISTEN=0.0.0.0
+      - WEBHOOK_PORT=5000
+      - LOG_LEVEL=INFO
+    volumes:
+      - ./data:/app/data  # Монтируем директорию для изображений
+    depends_on:
+      - db  # Если БД тоже в docker-compose
+    restart: unless-stopped
+
+  # Пример конфигурации образа БД Postgres, если планируется использовать её внутри контейнера
+  # db:
+  #   image: postgres:13
+  #   environment:
+  #     POSTGRES_DB: firefeed
+  #     POSTGRES_USER: user
+  #     POSTGRES_PASSWORD: password
+  #   ports:
+  #     - "5432:5432"
+  #   volumes:
+  #     - postgres_data:/var/lib/postgresql/data
+
+volumes:
+  postgres_data:

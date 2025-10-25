@@ -1,0 +1,35 @@
+# Исключаем ненужные файлы для сборки образа
+.git
+.gitignore
+README.md
+.env
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+env
+venv
+.venv
+pip-log.txt
+pip-delete-this-directory.txt
+.tox
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.log
+.git
+.mypy_cache
+.pytest_cache
+.hypothesis
+# Исключаем директории с данными, если они не нужны в образе
+data/
+# Исключаем тесты, если не нужны в продакшене
+test_*.py
+# Исключаем скрипты запуска, если используем CMD в Dockerfile
+run_*.sh
+# Исключаем chrome-extension, если не нужна в контейнере
+chrome-extension/

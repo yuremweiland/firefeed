@@ -1,6 +1,4 @@
-import os
 import asyncio
-import torch
 import spacy
 import time
 import re
