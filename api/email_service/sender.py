@@ -153,7 +153,7 @@ class EmailSender:
 
     def _get_reset_text_content(self, reset_token: str, language: str) -> str:
         """Возвращает текстовую версию письма сброса пароля"""
-        reset_link = f"https://yourdomain.com/reset-password?token={reset_token}"  # TODO: заменить на реальный домен
+        reset_link = f"https://firefeed.net.ru/api/v1/reset-password?token={reset_token}"  # TODO: заменить на реальный домен
         if language == "ru":
             return f"""
 FireFeed - Сброс пароля
