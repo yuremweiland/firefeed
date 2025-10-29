@@ -93,11 +93,11 @@ MAX_ENTRIES_PER_FEED = 3
 MAX_TOTAL_NEWS = 15
 # Максимальное количество RSS-лент, обрабатываемых одновременно
 MAX_CONCURRENT_FEEDS = 3
-# Интервал проверки новостей в API
-NEWS_CHECK_INTERVAL_SECONDS = 300
+# Интервал проверки RSS-элементов в API
+RSS_ITEM_CHECK_INTERVAL_SECONDS = 300
 
-# Порог уникальности новостей по смыслу (применяется для AI модели в FireFeedDublicateDetector)
-NEWS_SIMILARITY_THRESHOLD = 0.9
+# Порог уникальности RSS-элементов по смыслу (применяется для AI модели в FireFeedDublicateDetector)
+RSS_ITEM_SIMILARITY_THRESHOLD = 0.9
 # Абсолютный путь к директории с изображениями на сервере
 IMAGES_ROOT_DIR = "/var/www/firefeed/data/www/firefeed.net/data/images/"
 # Абсолютный путь к директории с изображениями на сайте

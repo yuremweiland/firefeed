@@ -7,14 +7,54 @@ from fastapi.security import OAuth2PasswordRequestForm
 
 from api.middleware import limiter
 from api import database, models
-from api.deps import create_access_token, verify_password, get_password_hash
+from api.deps import create_access_token, verify_password, get_password_hash, ACCESS_TOKEN_EXPIRE_MINUTES
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/v1/auth", tags=["authentication"])
+router = APIRouter(
+    prefix="/api/v1/auth",
+    tags=["authentication"],
+    responses={
+        401: {"description": "Unauthorized - Invalid or missing authentication token"},
+        429: {"description": "Too Many Requests - Rate limit exceeded"},
+        500: {"description": "Internal Server Error"}
+    }
+)
 
 
-@router.post("/register", response_model=models.UserResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/register",
+    response_model=models.UserResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Register a new user",
+    description="""
+    Register a new user account with email verification.
+
+    This endpoint creates a new user account and sends a verification email.
+    The user account will remain inactive until email verification is completed.
+
+    **Process:**
+    1. Validate email format and password strength
+    2. Check if email is already registered
+    3. Create user account (inactive state)
+    4. Generate and send verification code via email
+    5. Return user information
+
+    **Rate limit:** 5 requests per minute
+    """,
+    responses={
+        201: {
+            "description": "User successfully registered",
+            "model": models.UserResponse
+        },
+        400: {
+            "description": "Bad Request - Email already registered or invalid data",
+            "model": models.HTTPError
+        },
+        429: {"description": "Too Many Requests - Rate limit exceeded"},
+        500: {"description": "Internal Server Error"}
+    }
+)
 @limiter.limit("5/minute")
 async def register_user(request: Request, user: models.UserCreate, background_tasks: BackgroundTasks):
     pool = await database.get_db_pool()
@@ -59,7 +99,36 @@ async def register_user(request: Request, user: models.UserCreate, background_ta
     return models.UserResponse(**new_user)
 
 
-@router.post("/verify", response_model=models.SuccessResponse)
+@router.post(
+    "/verify",
+    response_model=models.SuccessResponse,
+    summary="Verify user email",
+    description="""
+    Verify user email address using the verification code sent during registration.
+
+    This endpoint activates the user account after successful email verification.
+
+    **Process:**
+    1. Validate verification code format (6 digits)
+    2. Find user by email and active verification code
+    3. Activate user account
+    4. Mark verification code as used
+
+    **Rate limit:** 300 requests per minute
+    """,
+    responses={
+        200: {
+            "description": "Email successfully verified",
+            "model": models.SuccessResponse
+        },
+        400: {
+            "description": "Bad Request - Invalid verification code or email",
+            "model": models.HTTPError
+        },
+        429: {"description": "Too Many Requests - Rate limit exceeded"},
+        500: {"description": "Internal Server Error"}
+    }
+)
 @limiter.limit("300/minute")
 async def verify_user(request: models.EmailVerificationRequest):
     pool = await database.get_db_pool()
@@ -79,7 +148,39 @@ async def verify_user(request: models.EmailVerificationRequest):
     return models.SuccessResponse(message="User successfully verified")
 
 
-@router.post("/login", response_model=models.Token)
+@router.post(
+    "/login",
+    response_model=models.Token,
+    summary="Authenticate user",
+    description="""
+    Authenticate user and return JWT access token.
+
+    This endpoint verifies user credentials and returns a JWT token for API access.
+    The user account must be active (email verified) to login successfully.
+
+    **Process:**
+    1. Validate email and password
+    2. Check if user exists and password is correct
+    3. Verify account is active (email verified)
+    4. Generate and return JWT access token
+
+    **Token validity:** 30 minutes
+
+    **Rate limit:** 10 requests per minute
+    """,
+    responses={
+        200: {
+            "description": "Authentication successful",
+            "model": models.Token
+        },
+        401: {
+            "description": "Unauthorized - Invalid credentials or account not verified",
+            "model": models.HTTPError
+        },
+        429: {"description": "Too Many Requests - Rate limit exceeded"},
+        500: {"description": "Internal Server Error"}
+    }
+)
 @limiter.limit("10/minute")
 async def login_user(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
     pool = await database.get_db_pool()
@@ -104,7 +205,39 @@ async def login_user(request: Request, form_data: OAuth2PasswordRequestForm = De
     return {"access_token": access_token, "token_type": "bearer", "expires_in": ACCESS_TOKEN_EXPIRE_MINUTES * 60}
 
 
-@router.post("/reset-password/request")
+@router.post(
+    "/reset-password/request",
+    summary="Request password reset",
+    description="""
+    Request a password reset token to be sent to the user's email.
+
+    This endpoint initiates the password reset process by sending a reset link
+    to the user's email address. The link will be valid for 1 hour.
+
+    **Process:**
+    1. Validate email format
+    2. Check if user exists (without revealing existence)
+    3. Generate secure reset token
+    4. Send password reset email with secure link
+
+    **Security note:** Always returns success message regardless of email existence
+    to prevent email enumeration attacks.
+
+    **Rate limit:** 300 requests per minute
+    """,
+    responses={
+        200: {
+            "description": "Password reset email sent (if email exists)",
+            "content": {
+                "application/json": {
+                    "example": {"message": "If email exists, reset instructions have been sent"}
+                }
+            }
+        },
+        429: {"description": "Too Many Requests - Rate limit exceeded"},
+        500: {"description": "Internal Server Error"}
+    }
+)
 @limiter.limit("300/minute")
 async def request_password_reset(request: models.PasswordResetRequest, background_tasks: BackgroundTasks):
     pool = await database.get_db_pool()
@@ -148,7 +281,42 @@ async def request_password_reset(request: models.PasswordResetRequest, backgroun
     return {"message": "If email exists, reset instructions have been sent"}
 
 
-@router.post("/reset-password/confirm")
+@router.post(
+    "/reset-password/confirm",
+    summary="Confirm password reset",
+    description="""
+    Confirm password reset using the token from email and set new password.
+
+    This endpoint completes the password reset process by validating the reset token
+    and updating the user's password.
+
+    **Process:**
+    1. Validate token format and new password strength
+    2. Verify reset token exists and is not expired
+    3. Update user password (hashed)
+    4. Delete used reset token
+
+    **Security:** Token is single-use and expires after 1 hour.
+
+    **Rate limit:** 300 requests per minute
+    """,
+    responses={
+        200: {
+            "description": "Password successfully reset",
+            "content": {
+                "application/json": {
+                    "example": {"message": "Password successfully reset"}
+                }
+            }
+        },
+        400: {
+            "description": "Bad Request - Invalid or expired token",
+            "model": models.HTTPError
+        },
+        429: {"description": "Too Many Requests - Rate limit exceeded"},
+        500: {"description": "Internal Server Error"}
+    }
+)
 @limiter.limit("300/minute")
 async def confirm_password_reset(request: models.PasswordResetConfirm):
     pool = await database.get_db_pool()

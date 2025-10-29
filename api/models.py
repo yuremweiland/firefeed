@@ -26,7 +26,7 @@ class RSSItem(BaseModel):
     translations: Optional[Dict[str, LanguageTranslation]] = None
 
     class Config:
-        from_attributes = True  # Для совместимости с ORM (если будете использовать)
+        from_attributes = True
 
 
 class CategoryItem(BaseModel):

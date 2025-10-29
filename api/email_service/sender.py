@@ -153,7 +153,7 @@ class EmailSender:
 
     def _get_reset_text_content(self, reset_token: str, language: str) -> str:
         """Возвращает текстовую версию письма сброса пароля"""
-        reset_link = f"https://firefeed.net.ru/api/v1/reset-password?token={reset_token}"  # TODO: заменить на реальный домен
+        reset_link = f"https://firefeed.net/api/v1/auth/reset-password/confirm?token={reset_token}"
         if language == "ru":
             return f"""
 FireFeed - Сброс пароля
@@ -391,7 +391,7 @@ FireFeed Team
     def _get_fallback_reset_html_content(self, reset_token: str, language: str) -> str:
         """Возвращает базовый HTML контент для сброса пароля если шаблон не найден"""
         year = datetime.now().year
-        reset_link = f"https://yourdomain.com/reset-password?token={reset_token}"  # TODO: заменить на реальный домен
+        reset_link = f"https://firefeed.net/api/v1/auth/reset-password/confirm?token={reset_token}"
         if language == "ru":
             return f"""
 <!DOCTYPE html>

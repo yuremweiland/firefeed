@@ -125,7 +125,7 @@ class FireFeedTranslator:
             "under", "above", "below", "left", "right", "back", "front", "before", "after", "during",
             "while", "since", "until", "from", "at", "by", "for", "with", "about", "against",
             "between", "into", "through", "across", "along", "around", "behind", "beside", "beyond",
-            "inside", "outside", "near", "far",
+            "inside", "outside", "near", "far", "AI"
             # Russian
             "и", "в", "на", "с", "по", "из", "к", "от", "у", "о", "а", "но", "да", "или", "что", "как",
             "где", "когда", "почему", "я", "ты", "он", "она", "оно", "мы", "вы", "они", "это", "тот",
@@ -139,7 +139,7 @@ class FireFeedTranslator:
             "слева", "справа", "перед", "после", "во", "со", "изо", "ко", "ото", "до", "без", "для",
             "про", "через", "сквозь", "между", "около", "возле", "против", "ради", "благодаря",
             "согласно", "несмотря", "вопреки", "вследствие", "из-за", "вслед", "вместо", "кроме",
-            "помимо", "сверх", "вдоль", "вокруг", "напротив", "рядом", "близко", "далеко",
+            "помимо", "сверх", "вдоль", "вокруг", "напротив", "рядом", "близко", "далеко", "ИИ",
             # German
             "der", "die", "das", "und", "mit", "auf", "für", "von", "zu", "im", "am", "ich", "du",
             "er", "sie", "es", "wir", "ihr", "sie", "dies", "das", "der", "die", "den", "dem", "des",
@@ -151,7 +151,7 @@ class FireFeedTranslator:
             "dann", "hier", "da", "oben", "unten", "innen", "außen", "vorn", "hinten", "links",
             "rechts", "vor", "nach", "während", "seit", "bis", "von", "zu", "bei", "für", "mit",
             "über", "gegen", "zwischen", "in", "aus", "durch", "quer", "entlang", "um", "hinter",
-            "neben", "jenseits", "nahe", "fern",
+            "neben", "jenseits", "nahe", "fern", "KI",
             # French
             "le", "la", "les", "et", "avec", "pour", "dans", "je", "tu", "il", "elle", "nous", "vous",
             "ils", "elles", "ce", "cet", "cette", "ces", "mon", "ton", "son", "notre", "votre",
@@ -162,7 +162,7 @@ class FireFeedTranslator:
             "ici", "là", "haut", "bas", "dedans", "dehors", "devant", "derrière", "gauche", "droite",
             "avant", "après", "pendant", "depuis", "jusqu", "de", "à", "chez", "pour", "avec", "sur",
             "contre", "entre", "dans", "hors", "par", "au-dessus", "en-dessous", "à-travers",
-            "le-long", "autour", "derrière", "à-côté", "au-delà", "dedans", "dehors", "près", "loin",
+            "le-long", "autour", "derrière", "à-côté", "au-delà", "dedans", "dehors", "près", "loin", "IA"
         }
         filtered_words = []
         for word in text.split():
@@ -194,7 +194,7 @@ class FireFeedTranslator:
                 unique_lines.append(line)
         text = ". ".join(unique_lines)
 
-        # 7. Замена терминов (регистронезависимо) - теперь только для случаев, когда перевод не сработал
+        # 7. Замена терминов (регистронезависимо) - только для случаев, когда перевод не сработал
         for eng, translations in self.terminology_dict.items():
             if target_lang in translations:
                 translated_term = translations[target_lang]

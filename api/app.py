@@ -20,11 +20,59 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="FireFeed API",
-    description="API для получения новостей из RSS-лент, обработанных Telegram-ботом.",
+    description="""
+    # FireFeed News Aggregator API
+
+    A comprehensive AI-powered news aggregation platform that collects, processes, and distributes news from RSS feeds in multiple languages.
+
+    ## Features
+
+    * **AI-Powered Content Processing**: Automatic translation to 4 languages (Russian, German, French, English) using modern ML models
+    * **Duplicate Detection**: Semantic analysis using vector embeddings to identify duplicate content
+    * **Multi-language Support**: Full localization for Telegram bot and REST API
+    * **Personalized Feeds**: User-specific RSS feed subscriptions with category filtering
+    * **Real-time Updates**: WebSocket support for live news updates
+    * **Secure Authentication**: JWT-based authentication with email verification
+
+    ## Authentication
+
+    All endpoints except `/api/v1/auth/register`, `/api/v1/auth/login`, `/api/v1/auth/reset-password/request`, and `/api/v1/auth/verify` require authentication.
+
+    Include the JWT token in the Authorization header:
+    ```
+    Authorization: Bearer <your_jwt_token>
+    ```
+
+    ## Rate Limiting
+
+    API endpoints are protected with rate limiting:
+    - Authentication endpoints: 5-300 requests per minute
+    - General endpoints: 100-300 requests per minute
+
+    ## Response Codes
+
+    - `200`: Success
+    - `201`: Created
+    - `400`: Bad Request
+    - `401`: Unauthorized
+    - `403`: Forbidden
+    - `404`: Not Found
+    - `429`: Too Many Requests
+    - `500`: Internal Server Error
+    """,
     version="1.0.0",
     openapi_url="/api/openapi.json",
     docs_url="/api/docs",
     redoc_url="/api/redoc",
+    contact={
+        "name": "FireFeed Support",
+        "url": "https://firefeed.net",
+        "email": "support@firefeed.net",
+    },
+    license_info={
+        "name": "MIT License",
+        "url": "https://opensource.org/licenses/MIT",
+    },
 )
 
 # Middleware & rate limiting

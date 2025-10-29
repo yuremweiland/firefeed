@@ -1185,9 +1185,9 @@ async def get_all_sources_list(
                 raise
 
 
-async def get_recent_news_for_broadcast(pool, last_check_time: datetime) -> List[Dict[str, Any]]:
+async def get_recent_rss_items_for_broadcast(pool, last_check_time: datetime) -> List[Dict[str, Any]]:
     """
-    Получает список последних новостей для отправки по WebSocket.
+    Получает список последних RSS-элементов для отправки по WebSocket.
     """
     async with pool.acquire() as conn:
         async with conn.cursor() as cur:

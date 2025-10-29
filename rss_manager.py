@@ -16,16 +16,12 @@ logger = logging.getLogger(__name__)
 
 
 class RSSManager:
-    # Сохраняем оригинальную сигнатуру конструктора, но без duplicate_detector
     def __init__(self, translator_queue=None):
-        # translator_queue остается для совместимости, если используется
         self.translator_queue = translator_queue
-        # Семафор для ограничения количества одновременно обрабатываемых фидов
         self._feed_semaphore = asyncio.Semaphore(MAX_CONCURRENT_FEEDS)
 
     async def get_pool(self):
         """Вспомогательный метод: Получает общий пул подключений из config.py."""
-        # Используем общий пул подключений из config.py
         return await get_shared_db_pool()
 
     async def close_pool(self):
@@ -69,10 +65,7 @@ class RSSManager:
                                 "source_id": row[4],
                                 "category_id": row[5],
                                 "source": row[6],  # s.name
-                                "category": row[7] if row[7] else "uncategorized",  # c.name
-                                # Добавьте cooldown_minutes, max_news_per_hour, если они нужны в feed_info
-                                # 'cooldown_minutes': row[8],
-                                # 'max_news_per_hour': row[9]
+                                "category": row[7] if row[7] else "uncategorized"
                             }
                         )
             return feeds
@@ -80,7 +73,7 @@ class RSSManager:
             logger.error(f"[DB] [RSSManager] Ошибка получения активных лент: {e}")
             import traceback
 
-            traceback.print_exc()  # Добавим traceback для лучшей отладки
+            traceback.print_exc()
             return []
 
     async def get_feeds_by_category(self, category_name):
@@ -108,8 +101,7 @@ class RSSManager:
                                 "source_id": row[4],
                                 "category_id": row[5],
                                 "source": row[6],  # s.name
-                                "category": row[7] if row[7] else "uncategorized",  # c.name
-                                "category_display": row[7],  # Для совместимости, если использовалось
+                                "category": row[7] if row[7] else "uncategorized",
                             }
                         )
             return feeds
@@ -142,8 +134,7 @@ class RSSManager:
                                 "source_id": row[4],
                                 "category_id": row[5],
                                 "source": row[6],  # s.name
-                                "category": row[7] if row[7] else "uncategorized",  # c.name
-                                "category_display": row[7],  # Для совместимости, если использовалось
+                                "category": row[7] if row[7] else "uncategorized",
                             }
                         )
             return feeds
@@ -176,8 +167,7 @@ class RSSManager:
                                 "source_id": row[4],
                                 "category_id": row[5],
                                 "source": row[6],  # s.name
-                                "category": row[7] if row[7] else "uncategorized",  # c.name
-                                "category_display": row[7],  # Для совместимости, если использовалось
+                                "category": row[7] if row[7] else "uncategorized",
                             }
                         )
             return feeds
@@ -348,7 +338,6 @@ class RSSManager:
             pool = await self.get_pool()
             async with pool.acquire() as conn:
                 async with conn.cursor() as cur:
-                    # Теперь используем только таблицу published_news_data
                     query = """
                     SELECT created_at
                     FROM published_news_data
@@ -366,7 +355,7 @@ class RSSManager:
             )
             return None
 
-    async def get_recent_news_count_for_feed(self, rss_feed_id, minutes=60):
+    async def get_recent_rss_items_count_for_feed(self, rss_feed_id, minutes=60):
         """Вспомогательный метод: Получает количество RSS-элементов из ленты за последние N минут"""
         try:
             pool = await self.get_pool()
@@ -374,15 +363,14 @@ class RSSManager:
             time_threshold = datetime.now(timezone.utc) - timedelta(minutes=minutes)
             async with pool.acquire() as conn:
                 async with conn.cursor() as cur:
-                    # Теперь используем только таблицу published_news_data
                     query = """
                     SELECT COUNT(*) FROM published_news_data
                     WHERE rss_feed_id = %s AND created_at >= %s
                     """
                     await cur.execute(query, (rss_feed_id, time_threshold))
                     row = await cur.fetchone()
-                    news_count = row[0] if row else 0
-            return news_count
+                    rss_items_count = row[0] if row else 0
+            return rss_items_count
         except Exception as e:
             logger.error(
                 f"[DB] [RSSManager] Ошибка при подсчете RSS-элементов за последние {minutes} минут для ленты {rss_feed_id}: {e}"
@@ -392,7 +380,6 @@ class RSSManager:
     # - ОСНОВНАЯ ЛОГИКА ПАРСИНГА -
     def generate_news_id(self, title: str, content: str, link: str, feed_id: int) -> str:
         """Генерирует уникальный ID новости на основе содержания"""
-        # Используем комбинацию заголовка, начала контента и ссылки
         content_hash = hashlib.sha256(
             f"{title.strip()}_{content.strip()[:500]}_{link.strip()}".encode("utf-8")
         ).hexdigest()
@@ -401,7 +388,6 @@ class RSSManager:
     async def check_for_duplicates(self, title: str, content: str, link: str, lang: str) -> bool:
         """Проверяет, является ли новость дубликатом"""
         try:
-            # Импортировать детектор дубликатов
             from firefeed_dublicate_detector import FireFeedDuplicateDetector
 
             detector = FireFeedDuplicateDetector()
@@ -521,7 +507,7 @@ class RSSManager:
             try:
                 cooldown_minutes = await self.get_feed_cooldown_minutes(rss_feed_id)
                 max_news_per_hour = await self.get_max_news_per_hour_for_feed(rss_feed_id)
-                recent_count = await self.get_recent_news_count_for_feed(rss_feed_id, cooldown_minutes)
+                recent_count = await self.get_recent_rss_items_count_for_feed(rss_feed_id, cooldown_minutes)
                 logger.debug(
                     f"[RSS] fetch_single_feed: cooldown_minutes = {cooldown_minutes}, max_news_per_hour = {max_news_per_hour}, recent_count = {recent_count}"
                 )
@@ -605,35 +591,31 @@ class RSSManager:
                     description = (entry.get("summary", "") or "").strip()
                     content = (entry.get("content", [{}])[0].get("value", "") or description or "").strip()
 
-                    # --- ИЗМЕНЕНИЕ: Генерация news_id на основе содержания ---
                     link = entry.get("link", "")
                     news_id = self.generate_news_id(title, content, link, rss_feed_id)
-                    short_id = news_id[:20]  # Для логов
+                    short_id = news_id[:20]
                     logger.debug(
                         f"[RSS] [NEWS_ID] Сгенерирован news_id: {short_id} для '{title[:30]}...' (link: {link[:50]}...)"
                     )
-                    # --- КОНЕЦ ИЗМЕНЕНИЯ ---
 
                     # - Инициализация базовых данных RSS-элемента -
-                    # --- ИЗМЕНЕНИЕ: news_id теперь часть news_item с самого начала ---
                     news_item = {
-                        "id": news_id,  # Добавляем ID сразу
+                        "id": news_id,
                         "title": title,
                         "content": content,
                         "link": link,
                         "lang": feed_info["lang"],
-                        "category": feed_info["category"],  # Теперь берется из feed_info
-                        "source": feed_info["source"],  # Теперь берется из feed_info
+                        "category": feed_info["category"],
+                        "source": feed_info["source"],
                         "published": entry.get("published_parsed") or entry.get("updated_parsed"),
-                        "image_filename": None,  # Инициализируем как None
-                        "video_url": None,  # Инициализируем как None
+                        "image_filename": None,
+                        "video_url": None,
                     }
-                    # --- КОНЕЦ ИЗМЕНЕНИЯ ---
 
                     # - Извлечение и обработка изображения -
                     image_url_from_rss = self.extract_image_from_rss_item(entry)
-                    image_url_for_processing = image_url_from_rss  # URL для дальнейшей обработки
-                    local_image_path = None  # Для хранения пути к скачанному изображению
+                    image_url_for_processing = image_url_from_rss
+                    local_image_path = None
                     logger.debug(f"[RSS] [IMG] image_url_from_rss = {image_url_from_rss}")
 
                     # Если из RSS не удалось извлечь изображение, пробуем извлечь из web preview
@@ -656,11 +638,9 @@ class RSSManager:
                     # Если удалось получить URL изображения, скачиваем его
                     if image_url_for_processing:
                         try:
-                            # --- ИЗМЕНЕНИЕ: Используем news_id из news_item вместо unique_key ---
                             logger.debug(
                                 f"[RSS] [IMG] Обработка изображения с URL: {image_url_for_processing[:100]}... (news_id: {short_id})"
                             )
-                            # --- КОНЕЦ ИЗМЕНЕНИЯ ---
 
                             # Проверяем тип контента перед скачиванием
                             timeout = aiohttp.ClientTimeout(total=10)
@@ -672,12 +652,10 @@ class RSSManager:
                                         logger.debug(
                                             f"[RSS] [IMG] Подтвержден тип изображения через HEAD. Скачиваем..."
                                         )
-                                        # --- ИЗМЕНЕНИЕ: Передаем news_id из news_item в download_and_save_image ---
                                         # Скачиваем и сохраняем изображение, используя news_id как идентификатор
                                         local_image_path = await ImageProcessor.download_and_save_image(
                                             image_url_for_processing, news_item["id"], save_directory=IMAGES_ROOT_DIR
                                         )
-                                        # --- КОНЕЦ ИЗМЕНЕНИЯ ---
                                     else:
                                         logger.warning(
                                             f"[RSS] [IMG] URL не является изображением (Content-Type: {content_type}). Пропуск."
@@ -713,10 +691,8 @@ class RSSManager:
 
                     # - Сохранение RSS-элемента в БД (ОДИН запрос с изображением) -
                     try:
-                        # --- ИЗМЕНЕНИЕ: news_item уже содержит news_id, передаем его как есть ---
                         # Передаем news_item с уже обработанным image_filename и встроенным news_id
                         saved_news_id = await self.save_rss_item_to_db(news_item, rss_feed_id)
-                        # --- КОНЕЦ ИЗМЕНЕНИЯ ---
                         if not saved_news_id:
                             logger.warning(
                                 f"[RSS] [WARN] Не удалось получить news_id для элемента '{title[:30]}...'. Пропуск."
@@ -733,6 +709,28 @@ class RSSManager:
                     except Exception as e:
                         logger.error(f"[RSS] [ERROR] Ошибка сохранения RSS-элемента в БД: {e}")
                         continue  # Пропускаем элемент, если не удалось сохранить
+
+                    # - Проверка дубликатов и генерация эмбеддинга -
+                    try:
+                        from firefeed_dublicate_detector import FireFeedDuplicateDetector
+                        detector = FireFeedDuplicateDetector()
+                        is_unique = await detector.process_rss_item(
+                            rss_item_id=saved_news_id,
+                            title=news_item["title"],
+                            content=news_item["content"],
+                            lang_code=news_item["lang"]
+                        )
+
+                        if not is_unique:
+                            logger.warning(f"[DUPLICATE] RSS-элемент {saved_news_id} оказался дубликатом, пропускаем обработку")
+                            continue
+
+                        logger.debug(f"[DUPLICATE] RSS-элемент {saved_news_id} уникален, продолжаем обработку")
+
+                    except Exception as e:
+                        logger.error(f"[DUPLICATE] [ERROR] Ошибка при проверке дубликатов для {saved_news_id}: {e}")
+                        # В случае ошибки проверки дубликатов продолжаем обработку, чтобы не терять контент
+                        # Можно настроить политику: пропускать или продолжать
 
                     # - Обработка перевода -
                     translations = {}
@@ -844,49 +842,6 @@ class RSSManager:
         logger.info(f"[RSS] [FINAL] Возвращаем {len(final_news)} последних RSS-элементов.")
         return final_news
 
-    def extract_image_from_rss_item(self, entry):
-        """Извлекает URL изображения из записи RSS."""
-        # 1. Проверяем media:content (Yahoo Media RSS)
-        if "media_content" in entry:
-            for media in entry["media_content"]:
-                if media.get("medium") == "image":
-                    return media.get("url")
-
-        # 2. Проверяем media:thumbnail
-        if "media_thumbnail" in entry and entry["media_thumbnail"]:
-            return entry["media_thumbnail"][0].get("url")
-
-        # 3. Проверяем enclosure
-        if "enclosures" in entry:
-            for enclosure in entry["enclosures"]:
-                if enclosure.get("type", "").startswith("image/"):
-                    return enclosure.get("href") or enclosure.get("url")
-
-        # 4. Проверяем links с типом изображения
-        if "links" in entry:
-            for link in entry["links"]:
-                if link.get("type", "").startswith("image/"):
-                    return link.get("href")
-
-        return None
-
-    def extract_video_from_rss_item(self, entry):
-        """Извлекает URL видео из записи RSS (упрощенная реализация)."""
-        # 1. Проверяем media:content на видео
-        if "media_content" in entry:
-            for media in entry["media_content"]:
-                if media.get("medium") == "video":
-                    return media.get("url")
-
-        # 2. Проверяем enclosure на видео
-        if "enclosures" in entry:
-            for enclosure in entry["enclosures"]:
-                content_type = enclosure.get("type", "")
-                if content_type.startswith("video/") or content_type in ["application/mp4", "application/x-mpegURL"]:
-                    return enclosure.get("href") or enclosure.get("url")
-
-        return None
-
     async def save_rss_item_to_db(self, news_item, rss_feed_id):
         """Сохраняет RSS-элемент в таблицу published_news_data и возвращает его news_id."""
         try:
@@ -895,16 +850,16 @@ class RSSManager:
                 async with conn.cursor() as cur:
                     # 1. Используем news_id из news_item (уже сгенерирован на основе содержания)
                     news_id = news_item["id"]
-                    short_id = news_id[:20]  # Для логов
+                    short_id = news_id[:20]
 
                     # 2. Подготавливаем данные
-                    title = news_item["title"][:255]  # Ограничиваем длину заголовка
-                    content = news_item["content"]  # Полное описание
+                    title = news_item["title"][:255]
+                    content = news_item["content"]
                     original_language = news_item["lang"]
                     image_filename = news_item["image_filename"]
                     category_name = news_item["category"]
                     source_name = news_item["source"]
-                    source_url = news_item["link"]  # Ссылка на оригинальную новость
+                    source_url = news_item["link"]
 
                     # 3. Получаем category_id
                     await cur.execute("SELECT id FROM categories WHERE name = %s", (category_name,))
@@ -951,12 +906,6 @@ class RSSManager:
                     logger.debug(
                         f"[DB] [save_rss_item_to_db] Запрос к 'published_news_data' выполнен. (ID: {short_id})"
                     )
-
-                    # - ИСПРАВЛЕНИЕ -
-                    # УДАЛЕН вызов await self.save_translations_to_db(news_id, translations={})
-                    # Переводы будут сохранены позже, в callback'е on_translation_success
-                    # ИЛИ в fetch_single_feed, если очередь не передана
-                    # - КОНЕЦ ИСПРАВЛЕНИЯ -
 
                     logger.info(
                         f"[DB] [save_rss_item_to_db] RSS-элемент успешно сохранен в БД (ID: {short_id}). Переводы будут обработаны отдельно."
@@ -1206,15 +1155,14 @@ class RSSManager:
         return None
 
     # - МЕТОДЫ ДЛЯ ТЕЛЕГРАМ-БОТА -
-    async def fetch_unprocessed_news(self):
+    async def fetch_unprocessed_rss_items(self):
         """Получает необработанные (непереведенные) RSS-элементы из БД."""
         try:
             pool = await self.get_pool()
-            unprocessed_news = []
+            unprocessed_rss_items = []
             async with pool.acquire() as conn:
                 async with conn.cursor() as cur:
                     # Получаем необработанные RSS-элементы без переводов
-                    # Теперь используем только таблицу published_news_data
                     query = """
                     SELECT 
                         nd.news_id,
@@ -1250,7 +1198,7 @@ class RSSManager:
                     for row in results:
                         row_dict = dict(zip(columns, row))
                         # Создаем структуру RSS-элемента для бота
-                        news_item = {
+                        rss_item = {
                             "news_id": row_dict["news_id"],
                             "title": row_dict["original_title"],
                             "description": row_dict["original_content"],
@@ -1264,10 +1212,10 @@ class RSSManager:
                             "translations": {},
                         }
                         # Добавляем заглушку для published если она отсутствует
-                        if "published" not in news_item:
-                            news_item["published"] = datetime.now(pytz.utc)
-                        unprocessed_news.append(news_item)
-            return unprocessed_news
+                        if "published" not in rss_item:
+                            rss_item["published"] = datetime.now(pytz.utc)
+                        unprocessed_rss_items.append(rss_item)
+            return unprocessed_rss_items
         except Exception as e:
             logger.error(f"[DB] [ERROR] Ошибка при получении необработанных RSS-элементов: {e}")
 

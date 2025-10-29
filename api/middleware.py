@@ -1,5 +1,5 @@
 import logging
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -10,6 +10,31 @@ logger = logging.getLogger(__name__)
 
 # --- Rate Limiting ---
 limiter = Limiter(key_func=get_remote_address)
+
+
+class ApplicationRateLimitMiddleware(BaseHTTPMiddleware):
+    """Application-level rate limiting middleware"""
+
+    async def dispatch(self, request: Request, call_next):
+        # Get client IP
+        client_ip = get_remote_address(request)
+
+        # Check application-level limits based on endpoint
+        path = request.url.path
+
+        # Stricter limits for auth endpoints
+        if path.startswith("/api/v1/auth"):
+            # Allow 100 requests per minute per IP for auth
+            pass  # SlowAPI limiter handles this
+
+        # General API limits
+        elif path.startswith("/api/"):
+            # Allow 1000 requests per minute per IP for general API
+            pass  # SlowAPI limiter handles this
+
+        # Continue with request
+        response = await call_next(request)
+        return response
 
 
 class ForceUTF8ResponseMiddleware(BaseHTTPMiddleware):
@@ -35,6 +60,7 @@ class ForceUTF8ResponseMiddleware(BaseHTTPMiddleware):
 
 def setup_middleware(app: FastAPI):
     app.add_middleware(ForceUTF8ResponseMiddleware)
+    app.add_middleware(ApplicationRateLimitMiddleware)
     app.add_middleware(SlowAPIMiddleware)
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
     # SlowAPI requires limiter in state

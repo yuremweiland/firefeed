@@ -14,18 +14,18 @@ class ImageProcessor:
     """Класс для обработки и скачивания изображений"""
 
     @staticmethod
-    async def download_and_save_image(url, news_id, save_directory=IMAGES_ROOT_DIR):
+    async def download_and_save_image(url, rss_item_id, save_directory=IMAGES_ROOT_DIR):
         """
-        Скачивает изображение и сохраняет его локально с именем файла на основе news_id.
-        Сохраняет по пути: save_directory/YYYY/MM/DD/{news_id}{ext}
+        Скачивает изображение и сохраняет его локально с именем файла на основе rss_item_id.
+        Сохраняет по пути: save_directory/YYYY/MM/DD/{rss_item_id}{ext}
 
         :param url: URL изображения
-        :param news_id: уникальный ID новости для БД
+        :param rss_item_id: уникальный ID RSS-элемента для БД
         :param save_directory: директория для сохранения изображений
         :return: путь к сохраненному файлу или None
         """
-        if not url or not news_id:
-            logger.debug(f"[DEBUG] Пропущено сохранение изображения: нет URL ({url}) или news_id ({news_id})")
+        if not url or not rss_item_id:
+            logger.debug(f"[DEBUG] Пропущено сохранение изображения: нет URL ({url}) или rss_item_id ({rss_item_id})")
             return None
 
         try:
@@ -67,11 +67,11 @@ class ImageProcessor:
                         if path.lower().endswith(tuple(IMAGE_FILE_EXTENSIONS)):
                             extension = os.path.splitext(path)[1].lower()
 
-                    safe_news_id = "".join(c for c in str(news_id) if c.isalnum() or c in ("-", "_")).rstrip()
-                    if not safe_news_id:
-                        safe_news_id = hashlib.md5(url.encode()).hexdigest()
+                    safe_rss_item_id = "".join(c for c in str(rss_item_id) if c.isalnum() or c in ("-", "_")).rstrip()
+                    if not safe_rss_item_id:
+                        safe_rss_item_id = hashlib.md5(url.encode()).hexdigest()
 
-                    filename = f"{safe_news_id}{extension}"
+                    filename = f"{safe_rss_item_id}{extension}"
                     file_path = os.path.join(full_save_directory, filename)
 
                     # Проверяем, существует ли файл уже

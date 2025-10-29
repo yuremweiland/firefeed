@@ -16,7 +16,60 @@ active_connections: Dict[WebSocket, dict] = {}
 active_connections_lock = asyncio.Lock()
 
 
-@router.websocket("/api/v1/ws/rss-items")
+@router.websocket(
+    "/api/v1/ws/rss-items",
+    name="rss_items_websocket",
+    summary="WebSocket for real-time RSS items updates",
+    description="""
+    Establish a WebSocket connection for receiving real-time updates about new RSS items.
+
+    This WebSocket endpoint allows clients to subscribe to live news updates filtered by language preferences.
+
+    **Connection Process:**
+    1. Client connects to WebSocket endpoint
+    2. Client sends subscription message within 10 seconds
+    3. Server acknowledges connection and starts sending updates
+
+    **Subscription Message Format:**
+    ```json
+    {
+        "type": "subscribe",
+        "display_language": "en",
+        "original_language": "en",
+        "use_translations": true
+    }
+    ```
+
+    **Supported Message Types:**
+    - `subscribe`: Initial subscription with filter parameters
+    - `ping`: Keep-alive ping (server responds with `pong`)
+    - `update_params`: Update filtering parameters
+
+    **Update Message Format:**
+    ```json
+    {
+        "type": "new_rss_items",
+        "timestamp": "2024-01-01T12:00:00",
+        "count": 3,
+        "rss_items": [
+            {
+                "news_id": "abc123",
+                "title": "Breaking News...",
+                "category": "Technology",
+                "published_at": "2024-01-01T12:00:00Z"
+            }
+        ]
+    }
+    ```
+
+    **Filtering Parameters:**
+    - `display_language`: Language for displaying content (en, ru, de, fr)
+    - `original_language`: Filter by original article language
+    - `use_translations`: Whether to use translated titles when available
+
+    **Connection Limits:** No explicit rate limiting, but server may disconnect inactive connections.
+    """
+)
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     params = None
@@ -108,10 +161,10 @@ async def broadcast_new_rss_items(rss_items_payload: List[dict]):
             )
         if filtered_items:
             message = {
-                "type": "new_news",
+                "type": "new_rss_items",
                 "timestamp": datetime.now().isoformat(),
                 "count": len(filtered_items),
-                "news": filtered_items[:5],
+                "rss_items": filtered_items[:5],
             }
             try:
                 await ws.send_text(json.dumps(message, ensure_ascii=False))
@@ -137,9 +190,9 @@ async def check_for_new_rss_items():
         logger.error("[RSS Items Check] Database pool is not available.")
         return
     while True:
-        await asyncio.sleep(config.NEWS_CHECK_INTERVAL_SECONDS)
+        await asyncio.sleep(config.RSS_ITEM_CHECK_INTERVAL_SECONDS)
         try:
-            rss_items_payload = await database.get_recent_news_for_broadcast(pool, last_rss_items_check_time)
+            rss_items_payload = await database.get_recent_rss_items_for_broadcast(pool, last_rss_items_check_time)
             if rss_items_payload:
                 await broadcast_new_rss_items(rss_items_payload)
             last_rss_items_check_time = datetime.now()

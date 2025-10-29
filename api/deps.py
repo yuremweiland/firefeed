@@ -1,9 +1,13 @@
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import Optional
+from urllib.parse import urlparse
 
 import bcrypt
 import jwt
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 import config
 
@@ -12,6 +16,8 @@ logger = logging.getLogger(__name__)
 SECRET_KEY = getattr(config, "JWT_SECRET_KEY", "your-secret-key-change-in-production")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
+
+security = HTTPBearer()
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
@@ -23,6 +29,63 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
+
+
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """Dependency to get current authenticated user"""
+    try:
+        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id: int = payload.get("sub")
+        if user_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid authentication credentials",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        return {"id": int(user_id)}
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has expired",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except jwt.JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
+def sanitize_search_phrase(search_phrase: str) -> str:
+    """Sanitize search phrase to prevent injection and limit length"""
+    if not search_phrase:
+        return ""
+
+    # Remove potentially dangerous characters and limit length
+    sanitized = re.sub(r'[^\w\s\-.,!?\'"()\[\]{}]', '', search_phrase)
+    return sanitized.strip()[:200]  # Limit to 200 characters
+
+
+def validate_rss_url(url: str) -> bool:
+    """Validate RSS URL format and safety"""
+    if not url or len(url) > 2048:  # Reasonable URL length limit
+        return False
+
+    try:
+        parsed = urlparse(url)
+        # Must have scheme and netloc
+        if not parsed.scheme or not parsed.netloc:
+            return False
+        # Only allow http/https
+        if parsed.scheme not in ['http', 'https']:
+            return False
+        # Basic domain validation
+        if not re.match(r'^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$', parsed.netloc.split(':')[0]):
+            return False
+        return True
+    except Exception:
+        return False
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -80,7 +143,7 @@ def build_translations_dict(row_dict):
     return translations
 
 
-def validate_news_query_params(display_language, from_date, cursor_published_at):
+def validate_rss_items_query_params(display_language, from_date, cursor_published_at):
     supported_languages = ["ru", "en", "de", "fr"]
     from fastapi import HTTPException, status
     from datetime import datetime

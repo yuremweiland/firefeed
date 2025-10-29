@@ -31,7 +31,7 @@ USER_STATES = {}
 USER_CURRENT_MENUS = {}
 USER_LANGUAGES = {}
 SEND_SEMAPHORE = asyncio.Semaphore(5)
-NEWS_PROCESSING_SEMAPHORE = asyncio.Semaphore(10)
+RSS_ITEM_PROCESSING_SEMAPHORE = asyncio.Semaphore(10)
 
 user_manager = None
 http_session = None  # Глобальная сессия для HTTP-запросов
@@ -487,7 +487,7 @@ async def debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 @retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=2, max=30))
-async def send_personal_news(bot, prepared_rss_item: PreparedRSSItem):
+async def send_personal_rss_items(bot, prepared_rss_item: PreparedRSSItem):
     """Отправляет персональные RSS-элементы подписчикам."""
     global user_manager
     news_id = prepared_rss_item.original_data.get("id")
@@ -501,7 +501,7 @@ async def send_personal_news(bot, prepared_rss_item: PreparedRSSItem):
         logger.info(f"Нет подписчиков для категории {category}")
         return
     translations_cache = prepared_rss_item.translations
-    original_news_lang = prepared_rss_item.original_data.get("lang", "")  # Имя переменной изменено для ясности
+    original_rss_item_lang = prepared_rss_item.original_data.get("lang", "")
 
     for i, user in enumerate(subscribers):
         try:
@@ -513,7 +513,7 @@ async def send_personal_news(bot, prepared_rss_item: PreparedRSSItem):
             content_to_send = None
 
             # Если язык пользователя совпадает с языком оригинала элемента
-            if user_lang == original_news_lang:
+            if user_lang == original_rss_item_lang:
                 title_to_send = prepared_rss_item.original_data["title"]
                 content_to_send = prepared_rss_item.original_data.get("content", "")
             # Иначе ищем перевод на язык пользователя
@@ -531,9 +531,9 @@ async def send_personal_news(bot, prepared_rss_item: PreparedRSSItem):
             content_to_send = TextProcessor.clean(content_to_send)
 
             lang_note = ""
-            if user_lang != original_news_lang:
+            if user_lang != original_rss_item_lang:
                 lang_note = (
-                    f"\n🌐 {TRANSLATED_FROM_LABELS.get(user_lang, 'Translated from')} {original_news_lang.upper()}\n"
+                    f"\n🌐 {TRANSLATED_FROM_LABELS.get(user_lang, 'Translated from')} {original_rss_item_lang.upper()}\n"
                 )
             content_text = (
                 f"🔥 <b>{title_to_send}</b>\n"
@@ -543,7 +543,7 @@ async def send_personal_news(bot, prepared_rss_item: PreparedRSSItem):
                 f"⚡ <a href='{prepared_rss_item.original_data.get('link', '#')}'>{READ_MORE_LABELS.get(user_lang, 'Read more')}</a>"
             )
             image_filename = prepared_rss_item.image_filename
-            logger.debug(f"send_personal_news image_filename = {image_filename}")
+            logger.debug(f"send_personal_rss_items image_filename = {image_filename}")
 
             if image_filename:
                 valid_image_url = re.match(
@@ -710,7 +710,7 @@ async def post_to_channel(bot, prepared_rss_item: PreparedRSSItem):
 # --- Основная логика обработки RSS-элементов ---
 async def process_rss_item(context, rss_item_from_api):
     """Обрабатывает RSS-элемент, полученный из API."""
-    async with NEWS_PROCESSING_SEMAPHORE:
+    async with RSS_ITEM_PROCESSING_SEMAPHORE:
         news_id = rss_item_from_api.get("news_id")  # ID остается news_id для совместимости
         logger.debug(f"Начало обработки RSS-элемента {news_id} из API")
 
@@ -734,7 +734,7 @@ async def process_rss_item(context, rss_item_from_api):
             for lang, translation_data in rss_item_from_api["translations"].items():
                 translations[lang] = {
                     "title": translation_data.get("title", ""),
-                    "content": translation_data.get("content", ""),  # Контент в API теперь content
+                    "content": translation_data.get("content", ""),
                     "category": translation_data.get("category", ""),
                 }
 
@@ -750,9 +750,9 @@ async def process_rss_item(context, rss_item_from_api):
             async with SEND_SEMAPHORE:
                 await post_to_channel(context.bot, prepared_rss_item)
 
-        async def limited_send_personal_news():
+        async def limited_send_personal_rss_items():
             async with SEND_SEMAPHORE:
-                await send_personal_news(context.bot, prepared_rss_item)
+                await send_personal_rss_items(context.bot, prepared_rss_item)
 
         tasks_to_await = []
         if rss_item_from_api.get("category") in CHANNEL_CATEGORIES:
@@ -761,7 +761,7 @@ async def process_rss_item(context, rss_item_from_api):
         else:
             logger.info(f"RSS-элемент категории '{rss_item_from_api.get('category')}' НЕ подходит для общего канала.")
 
-        tasks_to_await.append(limited_send_personal_news())
+        tasks_to_await.append(limited_send_personal_rss_items())
 
         if tasks_to_await:
             await asyncio.gather(*tasks_to_await, return_exceptions=True)
@@ -775,7 +775,7 @@ async def process_rss_item(context, rss_item_from_api):
         return True
 
 
-async def monitor_news_task(context: ContextTypes.DEFAULT_TYPE):
+async def monitor_rss_items_task(context: ContextTypes.DEFAULT_TYPE):
     logger.info("Запуск задачи мониторинга RSS-элементов")
     try:
         # Получаем необработанные RSS-элементы через API
@@ -884,7 +884,7 @@ def main():
 
     job_queue = application.job_queue
     if job_queue:
-        job_queue.run_repeating(monitor_news_task, interval=300, first=1, job_kwargs={"misfire_grace_time": 600})
+        job_queue.run_repeating(monitor_rss_items_task, interval=300, first=1, job_kwargs={"misfire_grace_time": 600})
         logger.info("Зарегистрирована задача мониторинга RSS-элементов (каждые 5 минут)")
 
     logger.info("Бот запущен в режиме Webhook")
