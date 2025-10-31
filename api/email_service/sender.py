@@ -55,13 +55,18 @@ class EmailSender:
             message.attach(html_part)
 
             # Отправляем email асинхронно с таймаутами (connect/read/write по 10 секунд)
+            # Для порта 465 используем SSL, для других портов - TLS
+            use_ssl = self.smtp_config["port"] == 465
+            use_start_tls = self.smtp_config.get("use_tls", False) and not use_ssl
+
             await send(
                 message,
                 hostname=self.smtp_config["server"],
                 port=self.smtp_config["port"],
                 username=self.sender_email,
                 password=self.smtp_config["password"],
-                start_tls=False,  # Используем SSL (порт 465)
+                start_tls=use_start_tls,
+                use_tls=use_ssl,
                 timeout=10,
             )
 
@@ -111,13 +116,18 @@ class EmailSender:
             message.attach(html_part)
 
             # Отправляем email асинхронно с таймаутом 10 секунд
+            # Для порта 465 используем SSL, для других портов - TLS
+            use_ssl = self.smtp_config["port"] == 465
+            use_start_tls = self.smtp_config.get("use_tls", False) and not use_ssl
+
             await send(
                 message,
                 hostname=self.smtp_config["server"],
                 port=self.smtp_config["port"],
                 username=self.sender_email,
                 password=self.smtp_config["password"],
-                start_tls=False,  # Используем SSL (порт 465)
+                start_tls=use_start_tls,
+                use_tls=use_ssl,
                 timeout=10,
             )
 

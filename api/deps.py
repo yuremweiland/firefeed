@@ -13,9 +13,10 @@ import config
 
 logger = logging.getLogger(__name__)
 
-SECRET_KEY = getattr(config, "JWT_SECRET_KEY", "your-secret-key-change-in-production")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
+# JWT constants moved to config.py
+SECRET_KEY = config.JWT_SECRET_KEY
+ALGORITHM = config.JWT_ALGORITHM
+ACCESS_TOKEN_EXPIRE_MINUTES = config.JWT_ACCESS_TOKEN_EXPIRE_MINUTES
 
 security = HTTPBearer()
 
@@ -42,7 +43,19 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
                 detail="Invalid authentication credentials",
                 headers={"WWW-Authenticate": "Bearer"},
             )
-        return {"id": int(user_id)}
+        # Get full user data from database
+        from api import database
+        pool = await database.get_db_pool()
+        if pool is None:
+            raise HTTPException(status_code=500, detail="Database error")
+        user_data = await database.get_user_by_id(pool, int(user_id))
+        if not user_data:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User not found",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        return user_data
     except jwt.ExpiredSignatureError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

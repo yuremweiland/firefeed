@@ -8,6 +8,7 @@ from fastapi.security import OAuth2PasswordRequestForm
 from api.middleware import limiter
 from api import database, models
 from api.deps import create_access_token, verify_password, get_password_hash, ACCESS_TOKEN_EXPIRE_MINUTES
+from api.email_service.sender import send_verification_email
 
 logger = logging.getLogger(__name__)
 
@@ -76,8 +77,6 @@ async def register_user(request: Request, user: models.UserCreate, background_ta
     if not ok:
         await database.delete_user(pool, new_user["id"])
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create verification code")
-
-    from email_service.sender import send_verification_email
 
     async def _send_verification(email: str, code: str, lang: str):
         start_ts = datetime.utcnow()
@@ -239,12 +238,12 @@ async def login_user(request: Request, form_data: OAuth2PasswordRequestForm = De
     }
 )
 @limiter.limit("300/minute")
-async def request_password_reset(request: models.PasswordResetRequest, background_tasks: BackgroundTasks):
+async def request_password_reset(request: Request, password_reset_request: models.PasswordResetRequest, background_tasks: BackgroundTasks):
     pool = await database.get_db_pool()
     if pool is None:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Database error")
 
-    user = await database.get_user_by_email(pool, request.email)
+    user = await database.get_user_by_email(pool, password_reset_request.email)
     if not user:
         return {"message": "If email exists, reset instructions have been sent"}
 
@@ -253,8 +252,6 @@ async def request_password_reset(request: models.PasswordResetRequest, backgroun
     success = await database.save_password_reset_token(pool, user["id"], token, expires_at)
     if not success:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create reset token")
-
-    from email_service.sender import send_password_reset_email
 
     async def _send_and_cleanup(email: str, token: str, lang: str):
         start_ts = datetime.utcnow()
@@ -276,7 +273,7 @@ async def request_password_reset(request: models.PasswordResetRequest, backgroun
             except Exception as del_e:
                 logger.error(f"[PasswordResetEmail] Failed to delete token on error: {del_e}")
 
-    background_tasks.add_task(_send_and_cleanup, request.email, token, user.get("language", "en"))
+    background_tasks.add_task(_send_and_cleanup, password_reset_request.email, token, user.get("language", "en"))
 
     return {"message": "If email exists, reset instructions have been sent"}
 
@@ -318,13 +315,13 @@ async def request_password_reset(request: models.PasswordResetRequest, backgroun
     }
 )
 @limiter.limit("300/minute")
-async def confirm_password_reset(request: models.PasswordResetConfirm):
+async def confirm_password_reset(request: Request, password_reset_confirm: models.PasswordResetConfirm):
     pool = await database.get_db_pool()
     if pool is None:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Database error")
 
-    new_password_hash = get_password_hash(request.new_password)
-    ok = await database.confirm_password_reset_transaction(pool, request.token, new_password_hash)
+    new_password_hash = get_password_hash(password_reset_confirm.new_password)
+    ok = await database.confirm_password_reset_transaction(pool, password_reset_confirm.token, new_password_hash)
     if not ok:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired token")
     return {"message": "Password successfully reset"}

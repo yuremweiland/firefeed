@@ -2,12 +2,18 @@ import asyncio
 import sys
 import os
 import logging
+import traceback
 
 # Добавляем корень проекта в путь поиска модулей
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from email_service.sender import send_verification_email
+from api.email_service.sender import send_verification_email
 
+# Настраиваем логирование
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 
@@ -22,11 +28,15 @@ async def test_email():
     # Тестируем отправку на разных языках
     for language in ["en", "ru", "de"]:
         logger.info(f"Тестируем отправку на языке: {language}")
-        success = await send_verification_email(test_email, verification_code, language)
-        if success:
-            logger.info(f"✅ Письмо на {language} успешно отправлено!")
-        else:
-            logger.error(f"❌ Ошибка при отправке письма на {language}")
+        try:
+            success = await send_verification_email(test_email, verification_code, language)
+            if success:
+                logger.info(f"✅ Письмо на {language} успешно отправлено!")
+            else:
+                logger.error(f"❌ Ошибка при отправке письма на {language}")
+        except Exception as e:
+            logger.error(f"❌ Исключение при отправке письма на {language}: {e}")
+            logger.error(f"Полный traceback: {traceback.format_exc()}")
 
     logger.info("Тест завершен!")
 
