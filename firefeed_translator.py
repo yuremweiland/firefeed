@@ -431,7 +431,7 @@ class FireFeedTranslator:
                     f"[TRANSLATOR] [{time.time():.3f}] Модель {model_name} загружена через Transformers на {self.device}."
                 )
 
-                # Валидация модели: тест на простом переводе
+                # Валидация модели: тест на легком переводе
                 test_result = self._validate_model(model, tokenizer)
                 if not test_result:
                     logger.error(f"[MODEL] Валидация модели {model_name} провалилась, модель может быть повреждена")

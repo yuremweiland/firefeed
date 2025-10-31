@@ -1,6 +1,6 @@
 import logging
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from api.middleware import limiter
 from api import database, models
@@ -53,7 +53,7 @@ router = APIRouter(
     }
 )
 @limiter.limit("300/minute")
-async def create_user_rss_feed(feed: models.UserRSSFeedCreate, current_user: dict = Depends(get_current_user)):
+async def create_user_rss_feed(request: Request, feed: models.UserRSSFeedCreate, current_user: dict = Depends(get_current_user)):
     # Validate RSS URL
     if not validate_rss_url(feed.url):
         raise HTTPException(status_code=400, detail="Invalid RSS URL format")
@@ -101,6 +101,7 @@ async def create_user_rss_feed(feed: models.UserRSSFeedCreate, current_user: dic
 )
 @limiter.limit("300/minute")
 async def get_user_rss_feeds(
+    request: Request,
     limit: int = Query(50, le=100, gt=0, description="Number of feeds per page (1-100)"),
     offset: int = Query(0, ge=0, description="Number of feeds to skip"),
     current_user: dict = Depends(get_current_user),
@@ -142,7 +143,7 @@ async def get_user_rss_feeds(
     }
 )
 @limiter.limit("300/minute")
-async def get_user_rss_feed(feed_id: int, current_user: dict = Depends(get_current_user)):
+async def get_user_rss_feed(request: Request, feed_id: int, current_user: dict = Depends(get_current_user)):
     pool = await database.get_db_pool()
     if pool is None:
         raise HTTPException(status_code=500, detail="Database error")
@@ -190,7 +191,7 @@ async def get_user_rss_feed(feed_id: int, current_user: dict = Depends(get_curre
     }
 )
 @limiter.limit("300/minute")
-async def update_user_rss_feed(feed_id: int, feed_update: models.UserRSSFeedUpdate, current_user: dict = Depends(get_current_user)):
+async def update_user_rss_feed(request: Request, feed_id: int, feed_update: models.UserRSSFeedUpdate, current_user: dict = Depends(get_current_user)):
     # Validate input lengths
     if feed_update.name is not None and len(feed_update.name) > 255:
         raise HTTPException(status_code=400, detail="Feed name too long (max 255 characters)")
@@ -238,7 +239,7 @@ async def update_user_rss_feed(feed_id: int, feed_update: models.UserRSSFeedUpda
     }
 )
 @limiter.limit("300/minute")
-async def delete_user_rss_feed(feed_id: int, current_user: dict = Depends(get_current_user)):
+async def delete_user_rss_feed(request: Request, feed_id: int, current_user: dict = Depends(get_current_user)):
     pool = await database.get_db_pool()
     if pool is None:
         raise HTTPException(status_code=500, detail="Database error")

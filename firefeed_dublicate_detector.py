@@ -59,26 +59,25 @@ class FireFeedDuplicateDetector(DatabaseMixin):
     ) -> Tuple[bool, Optional[Dict[str, Any]]]:
         """Проверка дубликата с уже имеющимся эмбеддингом"""
         try:
-            # Получаем пул один раз и передаем его в get_similar_news
             pool = await self.get_pool()
             # Ищем похожие RSS-элементы, исключая текущий
-            similar_rss_items = await self.get_similar_news(embedding, current_news_id=rss_item_id, limit=5, pool=pool)
+            similar_rss_items = await self.get_similar_rss_items(embedding, current_rss_item_id=rss_item_id, limit=5, pool=pool)
 
             # Динамический threshold
             threshold = self.processor.get_dynamic_threshold(text_length, text_type)
 
             # Проверяем схожесть
-            for news in similar_rss_items:
-                if news["embedding"] is not None:
+            for rss_item in similar_rss_items:
+                if rss_item["embedding"] is not None:
                     # Преобразуем эмбеддинг
                     try:
-                        if isinstance(news["embedding"], str):
-                            stored_embedding = json.loads(news["embedding"])
-                        elif isinstance(news["embedding"], (list, np.ndarray)):
+                        if isinstance(rss_item["embedding"], str):
+                            stored_embedding = json.loads(rss_item["embedding"])
+                        elif isinstance(rss_item["embedding"], (list, np.ndarray)):
                             stored_embedding = (
-                                list(news["embedding"])
-                                if isinstance(news["embedding"], np.ndarray)
-                                else news["embedding"]
+                                list(rss_item["embedding"])
+                                if isinstance(rss_item["embedding"], np.ndarray)
+                                else rss_item["embedding"]
                             )
                         else:
                             continue
@@ -92,7 +91,7 @@ class FireFeedDuplicateDetector(DatabaseMixin):
                         logger.info(
                             f"[DUBLICATE_DETECTOR] Найден дубликат с схожестью {similarity:.4f} (threshold: {threshold:.4f})"
                         )
-                        return True, news
+                        return True, rss_item
 
             return False, None
 
@@ -211,28 +210,28 @@ class FireFeedDuplicateDetector(DatabaseMixin):
             embedding = await self.generate_embedding(title, content, lang_code)
 
             # Ищем похожие RSS-элементы, исключая текущий
-            similar_rss_items = await self.get_similar_news(embedding, current_news_id=rss_item_id, limit=5)
+            similar_rss_items = await self.get_similar_rss_items(embedding, current_rss_item_id=rss_item_id, limit=5)
 
             # Длина текста для динамического threshold
             text_length = len(title) + len(content)
             threshold = self.processor.get_dynamic_threshold(text_length, "content")
 
             # Проверяем схожесть
-            for news in similar_rss_items:
-                if news["embedding"] is not None:
+            for rss_item in similar_rss_items:
+                if rss_item["embedding"] is not None:
                     # Преобразуем эмбеддинг
                     try:
-                        if isinstance(news["embedding"], str):
-                            stored_embedding = json.loads(news["embedding"])
-                        elif isinstance(news["embedding"], (list, np.ndarray)):
+                        if isinstance(rss_item["embedding"], str):
+                            stored_embedding = json.loads(rss_item["embedding"])
+                        elif isinstance(rss_item["embedding"], (list, np.ndarray)):
                             stored_embedding = (
-                                list(news["embedding"])
-                                if isinstance(news["embedding"], np.ndarray)
-                                else news["embedding"]
+                                list(rss_item["embedding"])
+                                if isinstance(rss_item["embedding"], np.ndarray)
+                                else rss_item["embedding"]
                             )
                         else:
                             logger.warning(
-                                f"[DUBLICATE_DETECTOR] Неизвестный тип данных для эмбеддинга: {type(news['embedding'])}"
+                                f"[DUBLICATE_DETECTOR] Неизвестный тип данных для эмбеддинга: {type(rss_item['embedding'])}"
                             )
                             continue
                     except (json.JSONDecodeError, ValueError) as e:
@@ -245,7 +244,7 @@ class FireFeedDuplicateDetector(DatabaseMixin):
                         logger.info(
                             f"[DUBLICATE_DETECTOR] Найден дубликат с схожестью {similarity:.4f} (threshold: {threshold:.4f})"
                         )
-                        return True, news
+                        return True, rss_item
 
             return False, None
 

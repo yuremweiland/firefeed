@@ -1,5 +1,5 @@
 import logging
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from api.middleware import limiter
 from api import database, models
@@ -40,7 +40,7 @@ router = APIRouter(
     }
 )
 @limiter.limit("300/minute")
-async def get_current_user_profile(current_user: dict = Depends(get_current_user)):
+async def get_current_user_profile(request: Request, current_user: dict = Depends(get_current_user)):
     return models.UserResponse(**current_user)
 
 
@@ -74,7 +74,7 @@ async def get_current_user_profile(current_user: dict = Depends(get_current_user
     }
 )
 @limiter.limit("300/minute")
-async def update_current_user(user_update: models.UserUpdate, current_user: dict = Depends(get_current_user)):
+async def update_current_user(request: Request, user_update: models.UserUpdate, current_user: dict = Depends(get_current_user)):
     # Validate input lengths
     if user_update.email and len(user_update.email) > 255:
         raise HTTPException(status_code=400, detail="Email too long (max 255 characters)")
@@ -122,7 +122,7 @@ async def update_current_user(user_update: models.UserUpdate, current_user: dict
     }
 )
 @limiter.limit("300/minute")
-async def delete_current_user(current_user: dict = Depends(get_current_user)):
+async def delete_current_user(request: Request, current_user: dict = Depends(get_current_user)):
     pool = await database.get_db_pool()
     if pool is None:
         raise HTTPException(status_code=500, detail="Database error")

@@ -16,60 +16,7 @@ active_connections: Dict[WebSocket, dict] = {}
 active_connections_lock = asyncio.Lock()
 
 
-@router.websocket(
-    "/api/v1/ws/rss-items",
-    name="rss_items_websocket",
-    summary="WebSocket for real-time RSS items updates",
-    description="""
-    Establish a WebSocket connection for receiving real-time updates about new RSS items.
-
-    This WebSocket endpoint allows clients to subscribe to live news updates filtered by language preferences.
-
-    **Connection Process:**
-    1. Client connects to WebSocket endpoint
-    2. Client sends subscription message within 10 seconds
-    3. Server acknowledges connection and starts sending updates
-
-    **Subscription Message Format:**
-    ```json
-    {
-        "type": "subscribe",
-        "display_language": "en",
-        "original_language": "en",
-        "use_translations": true
-    }
-    ```
-
-    **Supported Message Types:**
-    - `subscribe`: Initial subscription with filter parameters
-    - `ping`: Keep-alive ping (server responds with `pong`)
-    - `update_params`: Update filtering parameters
-
-    **Update Message Format:**
-    ```json
-    {
-        "type": "new_rss_items",
-        "timestamp": "2024-01-01T12:00:00",
-        "count": 3,
-        "rss_items": [
-            {
-                "news_id": "abc123",
-                "title": "Breaking News...",
-                "category": "Technology",
-                "published_at": "2024-01-01T12:00:00Z"
-            }
-        ]
-    }
-    ```
-
-    **Filtering Parameters:**
-    - `display_language`: Language for displaying content (en, ru, de, fr)
-    - `original_language`: Filter by original article language
-    - `use_translations`: Whether to use translated titles when available
-
-    **Connection Limits:** No explicit rate limiting, but server may disconnect inactive connections.
-    """
-)
+@router.websocket("/api/v1/ws/rss-items")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     params = None

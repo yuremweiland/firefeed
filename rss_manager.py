@@ -9,7 +9,7 @@ import pytz
 import aiohttp
 from urllib.parse import urljoin, urlparse
 from utils.image import ImageProcessor
-from config import IMAGES_ROOT_DIR, get_shared_db_pool, MAX_TOTAL_NEWS, MAX_ENTRIES_PER_FEED, MAX_CONCURRENT_FEEDS
+from config import IMAGES_ROOT_DIR, get_shared_db_pool, MAX_TOTAL_RSS_ITEMS, MAX_ENTRIES_PER_FEED, MAX_CONCURRENT_FEEDS
 import traceback
 
 logger = logging.getLogger(__name__)
@@ -500,7 +500,7 @@ class RSSManager:
         """
         # Задача будет ждать здесь, если уже обрабатывается MAX_CONCURRENT_FEEDS фидов
         async with self._feed_semaphore:
-            local_news = []
+            local_rss_items = []
             rss_feed_id = feed_info["id"]
 
             # Получаем параметры ленты
@@ -513,14 +513,14 @@ class RSSManager:
                 )
             except Exception as e:
                 logger.error(f"[RSS] [ERROR] Ошибка получения параметров ленты {rss_feed_id}: {e}")
-                return local_news  # Возвращаем пустой список в случае ошибки БД
+                return local_rss_items
 
             # Проверка лимита RSS-элементов за период кулдауна
             if recent_count >= max_news_per_hour:
                 logger.info(
                     f"[SKIP] Лента ID {rss_feed_id} достигла лимита {max_news_per_hour} RSS-элементов за {cooldown_minutes} минут. Опубликовано: {recent_count}"
                 )
-                return local_news
+                return local_rss_items
 
             # Проверка кулдауна (время последней публикации)
             try:
@@ -529,7 +529,7 @@ class RSSManager:
                 logger.error(
                     f"[RSS] [ERROR] Ошибка получения времени последней публикации для ленты {rss_feed_id}: {e}"
                 )
-                return local_news  # Возвращаем пустой список в случае ошибки БД
+                return local_rss_items
 
             if last_published:
                 elapsed = datetime.now(timezone.utc) - last_published
@@ -537,14 +537,14 @@ class RSSManager:
                     logger.info(
                         f"[SKIP] Лента ID {rss_feed_id} находится на кулдауне ({cooldown_minutes} мин). Прошло: {elapsed}"
                     )
-                    return local_news
+                    return local_rss_items
 
             # Если лента прошла все проверки — валидируем и парсим её
             try:
                 logger.info(f"[RSS] Валидация RSS ленты: {feed_info['name']} ({feed_info['url']})")
                 if not await self.validate_rss_feed(feed_info["url"], headers):
                     logger.warning(f"[RSS] RSS лента невалидна, пропуск: {feed_info['url']}")
-                    return local_news
+                    return local_rss_items
 
                 logger.info(f"[RSS] Парсинг ленты: {feed_info['name']} ({feed_info['url']})")
                 # Парсим RSS асинхронно
@@ -575,7 +575,7 @@ class RSSManager:
 
                 if not feed.entries:
                     logger.warning(f"[RSS] Нет записей в {feed_info['url']}")
-                    return local_news
+                    return local_rss_items
 
                 # - Обработка записей из RSS -
                 for i, entry in enumerate(feed.entries[:MAX_ENTRIES_PER_FEED]):
@@ -599,7 +599,7 @@ class RSSManager:
                     )
 
                     # - Инициализация базовых данных RSS-элемента -
-                    news_item = {
+                    rss_item = {
                         "id": news_id,
                         "title": title,
                         "content": content,
@@ -619,12 +619,12 @@ class RSSManager:
                     logger.debug(f"[RSS] [IMG] image_url_from_rss = {image_url_from_rss}")
 
                     # Если из RSS не удалось извлечь изображение, пробуем извлечь из web preview
-                    if not image_url_from_rss and news_item["link"]:
+                    if not image_url_from_rss and rss_item["link"]:
                         logger.debug(
-                            f"[RSS] [IMG] Попытка извлечения изображения из web preview для: {news_item['link']}"
+                            f"[RSS] [IMG] Попытка извлечения изображения из web preview для: {rss_item['link']}"
                         )
                         try:
-                            image_url_from_preview = await ImageProcessor.extract_image_from_preview(news_item["link"])
+                            image_url_from_preview = await ImageProcessor.extract_image_from_preview(rss_item["link"])
                             if image_url_from_preview:
                                 logger.debug(
                                     f"[RSS] [IMG] Найдено изображение в web preview: {image_url_from_preview[:100]}..."
@@ -654,7 +654,7 @@ class RSSManager:
                                         )
                                         # Скачиваем и сохраняем изображение, используя news_id как идентификатор
                                         local_image_path = await ImageProcessor.download_and_save_image(
-                                            image_url_for_processing, news_item["id"], save_directory=IMAGES_ROOT_DIR
+                                            image_url_for_processing, rss_item["id"], save_directory=IMAGES_ROOT_DIR
                                         )
                                     else:
                                         logger.warning(
@@ -672,17 +672,17 @@ class RSSManager:
 
                     # Если изображение было успешно скачано, обновляем путь
                     if local_image_path:
-                        news_item["image_filename"] = os.path.relpath(local_image_path, IMAGES_ROOT_DIR)
-                        logger.info(f"[RSS] [IMG] Изображение сохранено как: {news_item['image_filename']}")
+                        rss_item["image_filename"] = os.path.relpath(local_image_path, IMAGES_ROOT_DIR)
+                        logger.info(f"[RSS] [IMG] Изображение сохранено как: {rss_item['image_filename']}")
                     else:
                         logger.debug(f"[RSS] [IMG] Изображение не будет связано с элементом.")
 
                     # - Извлечение видео -
                     video_url = self.extract_video_from_rss_item(entry)
                     if video_url:
-                        news_item["video_url"] = video_url
+                        rss_item["video_url"] = video_url
                     else:
-                        news_item["video_url"] = None
+                        rss_item["video_url"] = None
 
                     # - Проверка на дубликаты ПЕРЕД сохранением в БД -
                     if await self.check_for_duplicates(title, content, link, feed_info["lang"]):
@@ -692,8 +692,8 @@ class RSSManager:
                     # - Сохранение RSS-элемента в БД (ОДИН запрос с изображением) -
                     try:
                         # Передаем news_item с уже обработанным image_filename и встроенным news_id
-                        saved_news_id = await self.save_rss_item_to_db(news_item, rss_feed_id)
-                        if not saved_news_id:
+                        saved_rss_item_id = await self.save_rss_item_to_db(rss_item, rss_feed_id)
+                        if not saved_rss_item_id:
                             logger.warning(
                                 f"[RSS] [WARN] Не удалось получить news_id для элемента '{title[:30]}...'. Пропуск."
                             )
@@ -703,7 +703,7 @@ class RSSManager:
 
                         # news_item['id'] уже установлено выше
                         logger.info(
-                            f"[DB] [SUCCESS] RSS-элемент и данные об изображении сохранены в БД: {saved_news_id[:20]}..."
+                            f"[DB] [SUCCESS] RSS-элемент и данные об изображении сохранены в БД: {saved_rss_item_id[:20]}..."
                         )
 
                     except Exception as e:
@@ -715,20 +715,20 @@ class RSSManager:
                         from firefeed_dublicate_detector import FireFeedDuplicateDetector
                         detector = FireFeedDuplicateDetector()
                         is_unique = await detector.process_rss_item(
-                            rss_item_id=saved_news_id,
-                            title=news_item["title"],
-                            content=news_item["content"],
-                            lang_code=news_item["lang"]
+                            rss_item_id=saved_rss_item_id,
+                            title=rss_item["title"],
+                            content=rss_item["content"],
+                            lang_code=rss_item["lang"]
                         )
 
                         if not is_unique:
-                            logger.warning(f"[DUPLICATE] RSS-элемент {saved_news_id} оказался дубликатом, пропускаем обработку")
+                            logger.warning(f"[DUPLICATE] RSS-элемент {saved_rss_item_id} оказался дубликатом, пропускаем обработку")
                             continue
 
-                        logger.debug(f"[DUPLICATE] RSS-элемент {saved_news_id} уникален, продолжаем обработку")
+                        logger.debug(f"[DUPLICATE] RSS-элемент {saved_rss_item_id} уникален, продолжаем обработку")
 
                     except Exception as e:
-                        logger.error(f"[DUPLICATE] [ERROR] Ошибка при проверке дубликатов для {saved_news_id}: {e}")
+                        logger.error(f"[DUPLICATE] [ERROR] Ошибка при проверке дубликатов для {saved_rss_item_id}: {e}")
                         # В случае ошибки проверки дубликатов продолжаем обработку, чтобы не терять контент
                         # Можно настроить политику: пропускать или продолжать
 
@@ -737,20 +737,20 @@ class RSSManager:
                     if self.translator_queue:
                         try:
                             logger.debug(
-                                f"[DEBUG] fetch_single_feed: Перед добавлением задачи перевода для {news_item['id'][:20]}..."
+                                f"[DEBUG] fetch_single_feed: Перед добавлением задачи перевода для {rss_item['id'][:20]}..."
                             )
-                            success_cb, error_cb = self._create_translation_callbacks(news_item["id"])
+                            success_cb, error_cb = self._create_translation_callbacks(rss_item["id"])
                             # Добавляем задачу перевода в очередь корректным способом
                             await self.translator_queue.add_task(
-                                title=news_item["title"],
-                                content=news_item["content"],
-                                original_lang=news_item["lang"],
+                                title=rss_item["title"],
+                                content=rss_item["content"],
+                                original_lang=rss_item["lang"],
                                 callback=success_cb,
                                 error_callback=error_cb,
-                                task_id=news_item["id"],
+                                task_id=rss_item["id"],
                             )
                             logger.debug(
-                                f"[DEBUG] fetch_single_feed: Задача перевода добавлена в очередь для {news_item['id'][:20]}"
+                                f"[DEBUG] fetch_single_feed: Задача перевода добавлена в очередь для {rss_item['id'][:20]}"
                             )
                         except Exception as e:
                             logger.error(f"[RSS] [ERROR] Ошибка добавления задачи перевода в очередь: {e}")
@@ -760,10 +760,10 @@ class RSSManager:
                             "[DEBUG] fetch_single_feed: translator_queue не предоставлена, переводы не будут обработаны."
                         )
 
-                    news_item["translations"] = translations
+                    rss_item["translations"] = translations
 
                     # 5. Добавляем элемент в список для возврата
-                    local_news.append(news_item)
+                    local_rss_items.append(rss_item)
                     logger.info(
                         f"[DB] [SUCCESS] RSS-элемент полностью обработан (сохранен с изображением, видео, переведен): {title[:50]}..."
                     )
@@ -774,11 +774,11 @@ class RSSManager:
 
                 traceback.print_exc()
 
-            return local_news
+            return local_rss_items
 
     async def fetch_rss_items(self):
         """Асинхронная функция для получения RSS-элементов из RSS-лент"""
-        all_news = []
+        all_rss_items = []
         try:
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
@@ -798,10 +798,10 @@ class RSSManager:
             try:
                 for coro in asyncio.as_completed(tasks):
                     try:
-                        local_news = await coro
-                        if local_news:
-                            all_news.extend(local_news)
-                            logger.info(f"[RSS] [FETCH] Получено {len(local_news)} элементов. Всего: {len(all_news)}")
+                        local_rss_items = await coro
+                        if local_rss_items:
+                            all_rss_items.extend(local_rss_items)
+                            logger.info(f"[RSS] [FETCH] Получено {len(local_rss_items)} элементов. Всего: {len(all_rss_items)}")
                         else:
                             logger.debug(f"[RSS] [FETCH] Получено 0 элементов от одной из лент.")
 
@@ -833,33 +833,33 @@ class RSSManager:
 
         # Сортировка и ограничение количества RSS-элементов
         try:
-            sorted_news = sorted(all_news, key=lambda x: x.get("published", datetime.min), reverse=True)
+            sorted_rss_items = sorted(all_rss_items, key=lambda x: x.get("published", datetime.min), reverse=True)
         except Exception as e:
             logger.warning(f"[RSS] [WARN] Ошибка сортировки RSS-элементов по дате: {e}")
-            sorted_news = all_news  # Если сортировка не удалась, возвращаем как есть
+            sorted_rss_items = all_rss_items
 
-        final_news = sorted_news[:MAX_TOTAL_NEWS]
-        logger.info(f"[RSS] [FINAL] Возвращаем {len(final_news)} последних RSS-элементов.")
-        return final_news
+        final_rss_items = sorted_rss_items[:MAX_TOTAL_RSS_ITEMS]
+        logger.info(f"[RSS] [FINAL] Возвращаем {len(final_rss_items)} последних RSS-элементов.")
+        return final_rss_items
 
-    async def save_rss_item_to_db(self, news_item, rss_feed_id):
+    async def save_rss_item_to_db(self, rss_item, rss_feed_id):
         """Сохраняет RSS-элемент в таблицу published_news_data и возвращает его news_id."""
         try:
             pool = await self.get_pool()
             async with pool.acquire() as conn:
                 async with conn.cursor() as cur:
-                    # 1. Используем news_id из news_item (уже сгенерирован на основе содержания)
-                    news_id = news_item["id"]
+                    # 1. Используем news_id из rss_item (уже сгенерирован на основе содержания)
+                    news_id = rss_item["id"]
                     short_id = news_id[:20]
 
                     # 2. Подготавливаем данные
-                    title = news_item["title"][:255]
-                    content = news_item["content"]
-                    original_language = news_item["lang"]
-                    image_filename = news_item["image_filename"]
-                    category_name = news_item["category"]
-                    source_name = news_item["source"]
-                    source_url = news_item["link"]
+                    title = rss_item["title"][:255]
+                    content = rss_item["content"]
+                    original_language = rss_item["lang"]
+                    image_filename = rss_item["image_filename"]
+                    category_name = rss_item["category"]
+                    source_name = rss_item["source"]
+                    source_url = rss_item["link"]
 
                     # 3. Получаем category_id
                     await cur.execute("SELECT id FROM categories WHERE name = %s", (category_name,))

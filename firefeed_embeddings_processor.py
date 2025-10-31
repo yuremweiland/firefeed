@@ -121,7 +121,7 @@ class FireFeedEmbeddingsProcessor:
         # Получение spacy модели
         nlp = self._get_spacy_model(lang_code)
         if nlp is None:
-            # Если модель не загружена, просто очистка
+            # Если модель не загружена, применяем простую очистку
             text = re.sub(r"\s+", " ", text).strip()
             return text
 

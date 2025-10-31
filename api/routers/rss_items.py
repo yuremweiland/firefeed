@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 
 from api.middleware import limiter
 from api import database, models
-from api.deps import format_datetime, get_full_image_url, build_translations_dict, validate_news_query_params, sanitize_search_phrase
+from api.deps import format_datetime, get_full_image_url, build_translations_dict, validate_rss_items_query_params, sanitize_search_phrase
 import config
 
 logger = logging.getLogger(__name__)
@@ -33,7 +33,7 @@ def process_rss_items_results(results, columns, display_language, original_langu
                 "content": row_dict["original_content"],
             }
         item_data = {
-            "rss_item_id": row_dict["news_id"],
+            "news_id": row_dict["news_id"],
             "original_title": row_dict["original_title"],
             "original_content": row_dict["original_content"],
             "original_language": row_dict["original_language"],
@@ -187,7 +187,7 @@ async def get_rss_items(
     }
 )
 @limiter.limit("300/minute")
-async def get_rss_item_by_id(rss_item_id: str):
+async def get_rss_item_by_id(request: Request, rss_item_id: str):
     pool = await database.get_db_pool()
     if pool is None:
         raise HTTPException(status_code=500, detail="Ошибка подключения к базе данных")
@@ -199,7 +199,7 @@ async def get_rss_item_by_id(rss_item_id: str):
         row, columns = full_result
         row_dict = dict(zip(columns, row))
         item_data = {
-            "rss_item_id": row_dict["news_id"],
+            "news_id": row_dict["news_id"],
             "original_title": row_dict["original_title"],
             "original_content": row_dict["original_content"],
             "original_language": row_dict["original_language"],
@@ -254,6 +254,7 @@ async def get_rss_item_by_id(rss_item_id: str):
 )
 @limiter.limit("300/minute")
 async def get_categories(
+    request: Request,
     limit: Optional[int] = Query(100, le=1000, gt=0),
     offset: Optional[int] = Query(0, ge=0),
     source_ids: Optional[List[int]] = Query(None),
@@ -314,6 +315,7 @@ async def get_categories(
 )
 @limiter.limit("300/minute")
 async def get_sources(
+    request: Request,
     limit: Optional[int] = Query(100, le=1000, gt=0),
     offset: Optional[int] = Query(0, ge=0),
     category_id: Optional[List[int]] = Query(None),
@@ -364,7 +366,7 @@ async def get_sources(
     }
 )
 @limiter.limit("300/minute")
-async def get_languages():
+async def get_languages(request: Request):
     return {"results": config.SUPPORTED_LANGUAGES}
 
 
@@ -421,7 +423,7 @@ async def get_languages():
     }
 )
 @limiter.limit("300/minute")
-async def health_check():
+async def health_check(request: Request):
     try:
         pool = await database.get_db_pool()
         if pool:

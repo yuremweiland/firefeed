@@ -38,7 +38,7 @@ class RSSParserService:
                 logger.info("[RSS_PARSER] Парсинг RSS лент завершен")
 
                 # Ждем 15 минут перед следующим парсингом или пока не будет установлен флаг self.running = False
-                for _ in range(900):  # 900 секунд / 1 секунда = 15 минут
+                for _ in range(900):
                     if not self.running:
                         logger.info("[RSS_PARSER] [PARSE_TASK] Получен сигнал остановки, завершение задачи парсинга.")
                         return
@@ -84,7 +84,7 @@ class RSSParserService:
                 logger.info("[CLEANUP] Периодическая очистка дубликатов завершена")
 
                 # Ждем 1 час перед следующей очисткой или пока не будет остановка
-                for _ in range(3600):  # 3600 секунд = 1 час
+                for _ in range(3600):
                     if not self.running:
                         logger.info(
                             "[RSS_PARSER] [CLEANUP_TASK] Получен сигнал остановки, завершение задачи очистки дубликатов."
@@ -101,7 +101,7 @@ class RSSParserService:
 
                 traceback.print_exc()
                 # Ждем 5 минут перед повторной попыткой или проверкой флага остановки
-                for _ in range(300):  # 300 секунд = 5 минут
+                for _ in range(300):
                     if not self.running:
                         logger.info(
                             "[RSS_PARSER] [CLEANUP_TASK] Получен сигнал остановки во время ожидания, завершение задачи очистки дубликатов."
@@ -115,7 +115,7 @@ class RSSParserService:
             try:
                 await self.batch_processor_job()
                 # Ждем 30 минут перед следующей пакетной обработкой или пока не будет остановка
-                for _ in range(1800):  # 1800 секунд / 1 секунда = 30 минут
+                for _ in range(1800):
                     if not self.running:
                         logger.info(
                             "[RSS_PARSER] [BATCH_TASK] Получен сигнал остановки, завершение задачи пакетной обработки."
@@ -132,7 +132,7 @@ class RSSParserService:
 
                 traceback.print_exc()
                 # Ждем минуту перед повторной попыткой или проверкой флага остановки
-                for _ in range(60):  # 60 секунд
+                for _ in range(60):
                     if not self.running:
                         logger.info(
                             "[RSS_PARSER] [BATCH_TASK] Получен сигнал остановки во время ожидания, завершение задачи пакетной обработки."
@@ -205,11 +205,11 @@ class RSSParserService:
                 await asyncio.wait_for(asyncio.shield(self._wait_for_tasks_to_stop()), timeout=10.0)
             except asyncio.TimeoutError:
                 logger.info("[RSS_PARSER] Таймаут ожидания завершения задач. Продолжаем остановку.")
-        # Для SIGINT просто продолжаем
+        # Для SIGINT продолжаем
 
     async def _wait_for_tasks_to_stop(self):
         """Вспомогательная функция для ожидания остановки задач"""
-        # Просто ждем, пока задачи не завершатся сами по self.running=False
+        # Ждем, пока задачи не завершатся сами по self.running=False
         # Это нужно для использования с wait_for
         while (
             (self.parse_task and not self.parse_task.done())
