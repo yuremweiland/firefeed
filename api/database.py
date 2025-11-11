@@ -5,7 +5,7 @@ import logging
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional, Dict, Any, List, Set, Tuple
 
 logger = logging.getLogger(__name__)

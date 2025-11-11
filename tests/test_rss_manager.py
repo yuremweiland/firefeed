@@ -1,7 +1,6 @@
 import pytest
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
-from datetime import datetime, timedelta
+from datetime import datetime
 from rss_manager import RSSManager
 
 

@@ -1,4 +1,3 @@
-import pytest
 from utils.text import TextProcessor
 
 

@@ -95,6 +95,8 @@ MAX_TOTAL_RSS_ITEMS = 15
 MAX_CONCURRENT_FEEDS = 3
 # Интервал проверки RSS-элементов в API
 RSS_ITEM_CHECK_INTERVAL_SECONDS = 300
+# Максимальное количество одновременных WebSocket соединений
+MAX_WEBSOCKET_CONNECTIONS = 1000
 
 # Порог уникальности RSS-элементов по смыслу (применяется для AI модели в FireFeedDublicateDetector)
 RSS_ITEM_SIMILARITY_THRESHOLD = 0.9

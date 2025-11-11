@@ -18,6 +18,13 @@ active_connections_lock = asyncio.Lock()
 
 @router.websocket("/api/v1/ws/rss-items")
 async def websocket_endpoint(websocket: WebSocket):
+    # Проверяем лимит соединений
+    async with active_connections_lock:
+        if len(active_connections) >= config.MAX_WEBSOCKET_CONNECTIONS:
+            logger.warning(f"[WebSocket] Connection limit reached ({config.MAX_WEBSOCKET_CONNECTIONS}). Rejecting new connection.")
+            await websocket.close(code=1013)  # Try again later
+            return
+
     await websocket.accept()
     params = None
     try:

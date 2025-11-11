@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import sys
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -27,14 +28,17 @@ logger = logging.getLogger(__name__)
 API_BASE_URL = "http://localhost:8000/api/v1"
 
 # --- Глобальные переменные ---
-USER_STATES = {}
-USER_CURRENT_MENUS = {}
-USER_LANGUAGES = {}
+USER_STATES = {}  # {user_id: {"current_subs": [...], "language": "en", "last_access": timestamp}}
+USER_CURRENT_MENUS = {}  # {user_id: "main", "last_access": timestamp}
+USER_LANGUAGES = {}  # {user_id: "en", "last_access": timestamp}
 SEND_SEMAPHORE = asyncio.Semaphore(5)
 RSS_ITEM_PROCESSING_SEMAPHORE = asyncio.Semaphore(10)
 
 user_manager = None
 http_session = None  # Глобальная сессия для HTTP-запросов
+
+# TTL для очистки устаревших данных (24 часа)
+USER_DATA_TTL_SECONDS = 24 * 60 * 60
 
 
 @dataclass
@@ -202,19 +206,54 @@ async def set_current_user_language(user_id: int, lang: str):
     global user_manager
     try:
         await user_manager.set_user_language(user_id, lang)
-        USER_LANGUAGES[user_id] = lang
+        USER_LANGUAGES[user_id] = {"language": lang, "last_access": time.time()}
     except Exception as e:
         logger.error(f"Ошибка установки языка для {user_id}: {e}")
+
+
+async def cleanup_expired_user_data():
+    """Очищает устаревшие данные пользователей (старше 24 часов)."""
+    current_time = time.time()
+    expired_threshold = current_time - USER_DATA_TTL_SECONDS
+
+    # Очищаем USER_STATES
+    expired_states = [uid for uid, data in USER_STATES.items()
+                     if isinstance(data, dict) and data.get("last_access", 0) < expired_threshold]
+    for uid in expired_states:
+        del USER_STATES[uid]
+
+    # Очищаем USER_CURRENT_MENUS
+    expired_menus = [uid for uid, data in USER_CURRENT_MENUS.items()
+                    if isinstance(data, dict) and data.get("last_access", 0) < expired_threshold]
+    for uid in expired_menus:
+        del USER_CURRENT_MENUS[uid]
+
+    # Очищаем USER_LANGUAGES
+    expired_langs = [uid for uid, data in USER_LANGUAGES.items()
+                    if isinstance(data, dict) and data.get("last_access", 0) < expired_threshold]
+    for uid in expired_langs:
+        del USER_LANGUAGES[uid]
+
+    if expired_states or expired_menus or expired_langs:
+        logger.info(f"[CLEANUP] Очищено устаревших данных: states={len(expired_states)}, menus={len(expired_menus)}, langs={len(expired_langs)}")
 
 
 async def get_current_user_language(user_id: int) -> str:
     """Получает актуальный язык пользователя из памяти или БД."""
     if user_id in USER_LANGUAGES:
-        return USER_LANGUAGES[user_id]
+        data = USER_LANGUAGES[user_id]
+        if isinstance(data, dict):
+            data["last_access"] = time.time()
+            return data["language"]
+        else:
+            # Обновляем старый формат
+            USER_LANGUAGES[user_id] = {"language": data, "last_access": time.time()}
+            return data
+
     try:
         lang = await user_manager.get_user_language(user_id)
         if lang:
-            USER_LANGUAGES[user_id] = lang
+            USER_LANGUAGES[user_id] = {"language": lang, "last_access": time.time()}
         return lang or "en"
     except Exception as e:
         logger.error(f"Ошибка получения языка для {user_id}: {e}")
@@ -242,7 +281,7 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         settings = await user_manager.get_user_settings(user_id)
         logger.info(f"Loaded settings for user {user_id}: {settings}")
         current_subs = settings["subscriptions"] if isinstance(settings["subscriptions"], list) else []
-        USER_STATES[user_id] = {"current_subs": current_subs, "language": settings["language"]}
+        USER_STATES[user_id] = {"current_subs": current_subs, "language": settings["language"], "last_access": time.time()}
         await _show_settings_menu(context.bot, update.effective_chat.id, user_id)
         USER_CURRENT_MENUS[user_id] = "settings"
     except Exception as e:
@@ -364,7 +403,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id not in USER_STATES:
             subs = await user_manager.get_user_subscriptions(user_id)
             current_subs = subs if isinstance(subs, list) else []
-            USER_STATES[user_id] = {"current_subs": current_subs, "language": await get_current_user_language(user_id)}
+            USER_STATES[user_id] = {"current_subs": current_subs, "language": await get_current_user_language(user_id), "last_access": time.time()}
         state = USER_STATES[user_id]
         current_lang = state["language"]
         if query.data.startswith("toggle_"):
@@ -401,7 +440,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(
                 chat_id=user_id, text=welcome_text, reply_markup=get_main_menu_keyboard(current_lang)
             )
-            USER_CURRENT_MENUS[user_id] = "main"
+            USER_CURRENT_MENUS[user_id] = {"menu": "main", "last_access": time.time()}
         elif query.data.startswith("lang_"):
             lang = query.data.split("_", 1)[1]
             await set_current_user_language(user_id, lang)
@@ -420,7 +459,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(
                 chat_id=user_id, text=welcome_text, reply_markup=get_main_menu_keyboard(lang)
             )
-            USER_CURRENT_MENUS[user_id] = "main"
+            USER_CURRENT_MENUS[user_id] = {"menu": "main", "last_access": time.time()}
         elif query.data == "change_lang":
             current_lang = await get_current_user_language(user_id)
             keyboard = [
@@ -441,7 +480,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text=get_message("button_error", current_lang),
             reply_markup=get_main_menu_keyboard(current_lang),
         )
-        USER_CURRENT_MENUS[user_id] = "main"
+        USER_CURRENT_MENUS[user_id] = {"menu": "main", "last_access": time.time()}
 
 
 async def handle_menu_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -481,7 +520,7 @@ async def debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     lang = await get_current_user_language(user_id)
     await update.message.reply_text(get_message("bot_active", lang), reply_markup=get_main_menu_keyboard(lang))
-    USER_CURRENT_MENUS[user_id] = "main"
+    USER_CURRENT_MENUS[user_id] = {"menu": "main", "last_access": time.time()}
 
 
 
@@ -884,8 +923,10 @@ def main():
 
     job_queue = application.job_queue
     if job_queue:
-        job_queue.run_repeating(monitor_rss_items_task, interval=300, first=1, job_kwargs={"misfire_grace_time": 600})
-        logger.info("Зарегистрирована задача мониторинга RSS-элементов (каждые 5 минут)")
+        job_queue.run_repeating(monitor_rss_items_task, interval=60, first=1, job_kwargs={"misfire_grace_time": 600})
+        job_queue.run_repeating(cleanup_expired_user_data, interval=3600, first=60)
+        logger.info("Зарегистрирована задача мониторинга RSS-элементов (каждую минуту)")
+        logger.info("Зарегистрирована задача очистки устаревших данных пользователей (каждые 60 минут)")
 
     logger.info("Бот запущен в режиме Webhook")
     try:

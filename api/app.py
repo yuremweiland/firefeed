@@ -13,7 +13,6 @@ from api.routers import rss_items as rss_items_router
 from api.websocket import router as ws_router, check_for_new_rss_items
 from api import database
 from logging_config import setup_logging
-import config
 
 setup_logging()
 logger = logging.getLogger(__name__)

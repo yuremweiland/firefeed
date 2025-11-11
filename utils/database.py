@@ -1,7 +1,6 @@
 import logging
-from typing import Optional, Any, Callable
+from typing import Any, Callable
 from functools import wraps
-import asyncio
 from config import get_shared_db_pool
 
 logger = logging.getLogger(__name__)

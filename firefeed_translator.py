@@ -1,5 +1,4 @@
 import asyncio
-import spacy
 import time
 import re
 import logging
@@ -97,10 +96,10 @@ class FireFeedTranslator:
 
     def _postprocess_text(self, text, target_lang="ru"):
         """Пост-обработка переведённого текста"""
-        # 1. Очистка лишних пробелов
+        # Очистка лишних пробелов
         text = re.sub(r"\s+", " ", text).strip()
 
-        # 2. Удаление последовательных повторений слов (улучшенная версия)
+        # Удаление последовательных повторений слов (улучшенная версия)
         words = text.split()
         if words:
             deduped_words = [words[0]]
@@ -112,68 +111,10 @@ class FireFeedTranslator:
                     deduped_words.append(word)
             text = " ".join(deduped_words)
 
-        # 3. Удаление слишком коротких слов (кроме предлогов и служебных слов)
-        short_words = {
-            # English
-            "a", "an", "the", "to", "of", "in", "on", "at", "by", "for", "with", "as", "is", "are", "was",
-            "were", "be", "been", "has", "have", "had", "do", "does", "did", "will", "would", "can",
-            "could", "may", "might", "must", "shall", "should", "it", "he", "she", "we", "they", "this",
-            "that", "here", "there", "so", "but", "or", "and", "if", "then", "when", "where", "why",
-            "how", "all", "some", "any", "no", "yes", "not", "very", "just", "only", "also", "even",
-            "too", "much", "many", "few", "more", "most", "less", "least", "good", "bad", "big",
-            "small", "new", "old", "first", "last", "next", "now", "then", "up", "down", "out", "over",
-            "under", "above", "below", "left", "right", "back", "front", "before", "after", "during",
-            "while", "since", "until", "from", "at", "by", "for", "with", "about", "against",
-            "between", "into", "through", "across", "along", "around", "behind", "beside", "beyond",
-            "inside", "outside", "near", "far", "AI"
-            # Russian
-            "и", "в", "на", "с", "по", "из", "к", "от", "у", "о", "а", "но", "да", "или", "что", "как",
-            "где", "когда", "почему", "я", "ты", "он", "она", "оно", "мы", "вы", "они", "это", "тот",
-            "та", "то", "те", "мой", "твой", "его", "её", "наш", "ваш", "их", "кто", "что", "где",
-            "когда", "почему", "как", "зачем", "ли", "бы", "же", "то", "ни", "нибудь", "либо", "или",
-            "да", "нет", "даже", "уже", "ещё", "тоже", "так", "также", "здесь", "там", "тут", "туда",
-            "сюда", "оттуда", "отсюда", "везде", "нигде", "всегда", "никогда", "иногда", "часто",
-            "редко", "много", "мало", "больше", "меньше", "лучше", "хуже", "хорошо", "плохо",
-            "большой", "маленький", "новый", "старый", "первый", "последний", "следующий", "теперь",
-            "тогда", "здесь", "там", "вверх", "вниз", "внутри", "снаружи", "спереди", "сзади",
-            "слева", "справа", "перед", "после", "во", "со", "изо", "ко", "ото", "до", "без", "для",
-            "про", "через", "сквозь", "между", "около", "возле", "против", "ради", "благодаря",
-            "согласно", "несмотря", "вопреки", "вследствие", "из-за", "вслед", "вместо", "кроме",
-            "помимо", "сверх", "вдоль", "вокруг", "напротив", "рядом", "близко", "далеко", "ИИ",
-            # German
-            "der", "die", "das", "und", "mit", "auf", "für", "von", "zu", "im", "am", "ich", "du",
-            "er", "sie", "es", "wir", "ihr", "sie", "dies", "das", "der", "die", "den", "dem", "des",
-            "ein", "eine", "einen", "einem", "eines", "mein", "dein", "sein", "ihr", "unser", "euer",
-            "ihr", "wer", "was", "wo", "wann", "warum", "wie", "weshalb", "ob", "wenn", "dann",
-            "hier", "da", "dort", "hin", "her", "überall", "nirgendwo", "immer", "nie", "manchmal",
-            "oft", "selten", "viel", "wenig", "mehr", "weniger", "besser", "schlechter", "gut",
-            "schlecht", "groß", "klein", "neu", "alt", "erster", "letzter", "nächster", "jetzt",
-            "dann", "hier", "da", "oben", "unten", "innen", "außen", "vorn", "hinten", "links",
-            "rechts", "vor", "nach", "während", "seit", "bis", "von", "zu", "bei", "für", "mit",
-            "über", "gegen", "zwischen", "in", "aus", "durch", "quer", "entlang", "um", "hinter",
-            "neben", "jenseits", "nahe", "fern", "KI",
-            # French
-            "le", "la", "les", "et", "avec", "pour", "dans", "je", "tu", "il", "elle", "nous", "vous",
-            "ils", "elles", "ce", "cet", "cette", "ces", "mon", "ton", "son", "notre", "votre",
-            "leur", "qui", "que", "quoi", "où", "quand", "pourquoi", "comment", "si", "quand",
-            "alors", "ici", "là", "partout", "nulle", "toujours", "jamais", "parfois", "souvent",
-            "rarement", "beaucoup", "peu", "plus", "moins", "mieux", "pire", "bien", "mal", "grand",
-            "petit", "nouveau", "vieux", "premier", "dernier", "suivant", "maintenant", "alors",
-            "ici", "là", "haut", "bas", "dedans", "dehors", "devant", "derrière", "gauche", "droite",
-            "avant", "après", "pendant", "depuis", "jusqu", "de", "à", "chez", "pour", "avec", "sur",
-            "contre", "entre", "dans", "hors", "par", "au-dessus", "en-dessous", "à-travers",
-            "le-long", "autour", "derrière", "à-côté", "au-delà", "dedans", "dehors", "près", "loin", "IA"
-        }
-        filtered_words = []
-        for word in text.split():
-            if len(word) >= 3 or word.lower() in short_words:
-                filtered_words.append(word)
-        text = " ".join(filtered_words)
-
-        # 4. Удаление последовательностей одинаковых символов (более 3 подряд)
+        # Удаление последовательностей одинаковых символов (более 3 подряд)
         text = re.sub(r"(.)\1{3,}", r"\1\1\1", text)
 
-        # 5. Исправление заглавных букв в начале предложения
+        # Исправление заглавных букв в начале предложения
         sentences = re.split(r"([.!?]+)", text)
         processed = []
         for i, part in enumerate(sentences):
@@ -183,7 +124,7 @@ class FireFeedTranslator:
                 processed.append(part)
         text = "".join(processed)
 
-        # 6. Удаление дубликатов предложений
+        # Удаление дубликатов предложений
         lines = text.split(". ")
         unique_lines = []
         seen = set()
@@ -194,16 +135,16 @@ class FireFeedTranslator:
                 unique_lines.append(line)
         text = ". ".join(unique_lines)
 
-        # 7. Замена терминов (регистронезависимо) - только для случаев, когда перевод не сработал
+        # Замена терминов (регистронезависимо) - только для случаев, когда перевод не сработал
         for eng, translations in self.terminology_dict.items():
             if target_lang in translations:
                 translated_term = translations[target_lang]
                 text = re.sub(r"\b" + re.escape(eng) + r"\b", translated_term, text, flags=re.IGNORECASE)
 
-        # 8. Удаление лишних символов в конце
+        # Удаление лишних символов в конце
         text = text.strip(" .,;")
 
-        # 9. Финальная проверка: если текст слишком короткий или содержит мало букв, вернуть пустую строку
+        # Финальная проверка: если текст слишком короткий или содержит мало букв, вернуть пустую строку
         if len(text) < 10 or len(re.findall(r"[a-zA-Zа-яА-Я]", text)) < len(text) * 0.5:
             return ""
 
@@ -366,10 +307,25 @@ class FireFeedTranslator:
             gc.collect()
             logger.info(f"[MEMORY] Выгружено {len(models_to_remove)} неиспользуемых моделей")
 
+        # Также очищаем старые записи из translation_cache (старше 1 часа)
+        translation_cache_threshold = 3600  # 1 час
+        old_translations = []
+        for cache_key, _ in self.translation_cache.items():
+            # Для упрощения очищаем 10% самых старых записей если кэш большой
+            if len(self.translation_cache) > 1000:
+                items_to_remove = max(1, len(self.translation_cache) // 10)
+                for _ in range(items_to_remove):
+                    if self.translation_cache:
+                        old_key, _ = self.translation_cache.popitem(last=False)
+                        old_translations.append(old_key)
+
+        if old_translations:
+            logger.info(f"[MEMORY] Очищено {len(old_translations)} старых записей из translation_cache")
+
     async def _model_cleanup_task(self):
         """Фоновая задача для периодической выгрузки неиспользуемых моделей"""
         while True:
-            await asyncio.sleep(600)  # Каждые 10 минут
+            await asyncio.sleep(1800)  # Каждые 30 минут
             try:
                 self._unload_unused_models()
             except Exception as e:
