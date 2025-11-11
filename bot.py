@@ -526,18 +526,25 @@ async def debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 @retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=2, max=30))
-async def send_personal_rss_items(bot, prepared_rss_item: PreparedRSSItem):
+async def send_personal_rss_items(bot, prepared_rss_item: PreparedRSSItem, subscribers_cache=None):
     """Отправляет персональные RSS-элементы подписчикам."""
-    global user_manager
     news_id = prepared_rss_item.original_data.get("id")
     logger.info(f"Отправка персонального RSS-элемента: {prepared_rss_item.original_data['title'][:50]}...")
     category = prepared_rss_item.original_data.get("category")
     if not category:
         logger.warning(f"RSS-элемент {news_id} не имеет категории")
         return
-    subscribers = await user_manager.get_subscribers_for_category(category)
+
+    # Используем кэш подписчиков, если он передан
+    if subscribers_cache is not None:
+        subscribers = subscribers_cache.get(category, [])
+    else:
+        # Fallback на старый способ, если кэш не передан
+        global user_manager
+        subscribers = await user_manager.get_subscribers_for_category(category)
+
     if not subscribers:
-        logger.info(f"Нет подписчиков для категории {category}")
+        logger.debug(f"Нет подписчиков для категории {category}")
         return
     translations_cache = prepared_rss_item.translations
     original_rss_item_lang = prepared_rss_item.original_data.get("lang", "")
@@ -747,7 +754,7 @@ async def post_to_channel(bot, prepared_rss_item: PreparedRSSItem):
 
 
 # --- Основная логика обработки RSS-элементов ---
-async def process_rss_item(context, rss_item_from_api):
+async def process_rss_item(context, rss_item_from_api, subscribers_cache=None, channel_categories_cache=None):
     """Обрабатывает RSS-элемент, полученный из API."""
     async with RSS_ITEM_PROCESSING_SEMAPHORE:
         news_id = rss_item_from_api.get("news_id")  # ID остается news_id для совместимости
@@ -791,16 +798,19 @@ async def process_rss_item(context, rss_item_from_api):
 
         async def limited_send_personal_rss_items():
             async with SEND_SEMAPHORE:
-                await send_personal_rss_items(context.bot, prepared_rss_item)
+                await send_personal_rss_items(context.bot, prepared_rss_item, subscribers_cache)
 
         tasks_to_await = []
-        if rss_item_from_api.get("category") in CHANNEL_CATEGORIES:
-            logger.info(f"RSS-элемент категории '{rss_item_from_api.get('category')}' подходит для общего канала.")
+        category = rss_item_from_api.get("category")
+        # Используем кэш для проверки пригодности категории для общего канала
+        if category and channel_categories_cache and channel_categories_cache.get(category, False):
             tasks_to_await.append(limited_post_to_channel())
-        else:
-            logger.info(f"RSS-элемент категории '{rss_item_from_api.get('category')}' НЕ подходит для общего канала.")
 
-        tasks_to_await.append(limited_send_personal_rss_items())
+        # Проверяем, есть ли подписчики для категории перед добавлением задачи персональной отправки
+        if category and subscribers_cache and subscribers_cache.get(category):
+            tasks_to_await.append(limited_send_personal_rss_items())
+        else:
+            logger.debug(f"Пропуск персональной отправки для новости {news_id} - нет подписчиков для категории {category}")
 
         if tasks_to_await:
             await asyncio.gather(*tasks_to_await, return_exceptions=True)
@@ -830,7 +840,30 @@ async def monitor_rss_items_task(context: ContextTypes.DEFAULT_TYPE):
             logger.info("Нет RSS-элементов для обработки.")
             return
 
-        processing_tasks = [process_rss_item(context, rss_item) for rss_item in unprocessed_rss_list]
+        # Сбор уникальных категорий для оптимизации запросов подписчиков
+        unique_categories = set()
+        for rss_item in unprocessed_rss_list:
+            category = rss_item.get("category")
+            if category:
+                unique_categories.add(category)
+
+        # Предварительное получение подписчиков для уникальных категорий
+        subscribers_cache = {}
+        # Кэш для проверки категорий на пригодность для общего канала
+        channel_categories_cache = {}
+        global user_manager
+        for category in unique_categories:
+            subscribers = await user_manager.get_subscribers_for_category(category)
+            subscribers_cache[category] = subscribers
+            channel_categories_cache[category] = category in CHANNEL_CATEGORIES
+            if not subscribers:
+                logger.info(f"Нет подписчиков для категории {category}")
+            if channel_categories_cache[category]:
+                logger.info(f"Категория '{category}' подходит для общего канала")
+            else:
+                logger.info(f"Категория '{category}' НЕ подходит для общего канала")
+
+        processing_tasks = [process_rss_item(context, rss_item, subscribers_cache, channel_categories_cache) for rss_item in unprocessed_rss_list]
 
         logger.info(f"Запуск обработки {len(processing_tasks)} RSS-элементов...")
         try:
