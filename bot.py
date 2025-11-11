@@ -957,7 +957,7 @@ def main():
     job_queue = application.job_queue
     if job_queue:
         job_queue.run_repeating(monitor_rss_items_task, interval=60, first=1, job_kwargs={"misfire_grace_time": 600})
-        job_queue.run_repeating(cleanup_expired_user_data, interval=3600, first=60)
+        job_queue.run_repeating(cleanup_expired_user_data(), interval=3600, first=60)
         logger.info("Зарегистрирована задача мониторинга RSS-элементов (каждую минуту)")
         logger.info("Зарегистрирована задача очистки устаревших данных пользователей (каждые 60 минут)")
 
