@@ -1282,6 +1282,7 @@ async def get_recent_rss_items_for_broadcast(pool, last_check_time: datetime) ->
 
 async def create_user_api_key(pool, user_id: int, plain_key: str, limits: Dict[str, int], expires_at: Optional[datetime] = None) -> Optional[Dict[str, Any]]:
     """Создает новый API-ключ для пользователя"""
+    import json
     from api.deps import hash_api_key
     key_hash = hash_api_key(plain_key)
     async with pool.acquire() as conn:
@@ -1289,11 +1290,11 @@ async def create_user_api_key(pool, user_id: int, plain_key: str, limits: Dict[s
             try:
                 query = """
                 INSERT INTO user_api_keys (user_id, key_hash, limits, is_active, created_at, expires_at)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s::jsonb, %s, %s, %s)
                 RETURNING id, user_id, key_hash, limits, is_active, created_at, expires_at
                 """
                 now = datetime.utcnow()
-                await cur.execute(query, (user_id, key_hash, limits, True, now, expires_at))
+                await cur.execute(query, (user_id, key_hash, json.dumps(limits), True, now, expires_at))
                 result = await cur.fetchone()
                 if result:
                     columns = [desc[0] for desc in cur.description]
@@ -1416,3 +1417,27 @@ async def delete_user_api_key(pool, user_id: int, key_id: int) -> bool:
             except Exception as e:
                 logger.error(f"[DB] Error deleting user API key: {e}")
                 return False
+
+
+# --- Функции для работы с привязкой Telegram ---
+
+
+async def get_telegram_link_status(pool, user_id: int) -> Optional[Dict[str, Any]]:
+    """Получает статус привязки Telegram для пользователя"""
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            try:
+                query = """
+                SELECT telegram_id, linked_at
+                FROM user_telegram_links
+                WHERE user_id = %s
+                """
+                await cur.execute(query, (user_id,))
+                result = await cur.fetchone()
+                if result:
+                    columns = [desc[0] for desc in cur.description]
+                    return dict(zip(columns, result))
+                return None
+            except Exception as e:
+                logger.error(f"[DB] Error getting Telegram link status: {e}")
+                return None

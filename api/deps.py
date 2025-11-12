@@ -264,8 +264,13 @@ async def get_current_user_by_api_key(request: Request):
                 detail="X-API-Key header required",
             )
 
+        logger.info(f"[API_KEY_AUTH] Received API key: {api_key}")
+        logger.info(f"[API_KEY_AUTH] SITE_API_KEY from config: {config.SITE_API_KEY}")
+        logger.info(f"[API_KEY_AUTH] BOT_API_KEY from config: {config.BOT_API_KEY}")
+
         # Check if it's the site or bot API key
         if config.SITE_API_KEY and api_key == config.SITE_API_KEY:
+            logger.info("[API_KEY_AUTH] SITE_API_KEY matched - authenticating as system user")
             # Site key: unlimited access, return system user
             return {
                 "id": 0,  # System user ID
@@ -277,6 +282,7 @@ async def get_current_user_by_api_key(request: Request):
                 "api_key_data": {"limits": {}}  # No limits
             }
         if config.BOT_API_KEY and api_key == config.BOT_API_KEY:
+            logger.info("[API_KEY_AUTH] BOT_API_KEY matched - authenticating as bot user")
             # Bot key: unlimited access, return bot user
             return {
                 "id": -1,  # Bot user ID
@@ -287,6 +293,8 @@ async def get_current_user_by_api_key(request: Request):
                 "updated_at": None,
                 "api_key_data": {"limits": {}}  # No limits
             }
+
+        logger.info("[API_KEY_AUTH] No special API key match, checking user API keys")
 
         # Get API key data from database
         from api import database

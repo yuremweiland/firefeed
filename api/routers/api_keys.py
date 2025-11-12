@@ -21,7 +21,7 @@ router = APIRouter(
 
 @router.post(
     "/generate-own",
-    response_model=models.UserApiKeyResponse,
+    response_model=models.UserApiKeyGenerateResponse,
     summary="Generate API key for current user",
     description="""
     Generate a new API key for the currently authenticated user.
@@ -33,7 +33,7 @@ router = APIRouter(
     responses={
         200: {
             "description": "API key generated successfully",
-            "model": models.UserApiKeyResponse
+            "model": models.UserApiKeyGenerateResponse
         },
         401: {"description": "Unauthorized - Authentication required"},
         429: {"description": "Too Many Requests - Rate limit exceeded"},
@@ -56,6 +56,7 @@ async def generate_own_api_key(request: Request, current_user: dict = Depends(ge
 
     return models.UserApiKeyGenerateResponse(
         id=api_key["id"],
+        user_id=api_key["user_id"],
         key=key,
         limits=limits,
         created_at=api_key["created_at"],

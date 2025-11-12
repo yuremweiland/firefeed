@@ -203,6 +203,7 @@ class UserApiKeyResponse(UserApiKeyBase):
 
 class UserApiKeyGenerateResponse(BaseModel):
     id: int
+    user_id: int
     key: str
     limits: Dict[str, int]
     created_at: datetime

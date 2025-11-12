@@ -68,6 +68,7 @@ FireFeed - это высокопроизводительная система д
 - Python 3.8+ с asyncio
 - FastAPI для REST API
 - PostgreSQL с pgvector для семантического поиска
+- Redis для хранения данных об использовании API keys
 - aiopg для асинхронных запросов к БД
 
 ### AI/ML
@@ -150,13 +151,51 @@ chmod +x ./run_api.sh
 Создайте файл `.env` в корневой директории проекта:
 
 ```env
-DATABASE_URL=postgresql://user:password@localhost/firefeed
-TELEGRAM_BOT_TOKEN=your_telegram_bot_token
-JWT_SECRET_KEY=your_jwt_secret_key
+# Logging level (DEBUG, INFO, WARNING, ERROR)
+LOG_LEVEL=INFO
+
+# Database configuration
+DB_HOST=localhost
+DB_USER=your_db_user
+DB_PASSWORD=your_db_password
+DB_NAME=firefeed
+DB_PORT=5432
+DB_MINSIZE=5
+DB_MAXSIZE=20
+
+# SMTP configuration for email notifications
 SMTP_SERVER=smtp.yourdomain.com
-SMTP_PORT=587
-SMTP_USERNAME=your_smtp_username
+SMTP_PORT=465
+SMTP_EMAIL=your_email@yourdomain.com
 SMTP_PASSWORD=your_smtp_password
+SMTP_USE_TLS=True
+
+# Webhook configuration for Telegram bot
+WEBHOOK_LISTEN=127.0.0.1
+WEBHOOK_PORT=5000
+WEBHOOK_URL_PATH=webhook
+WEBHOOK_URL=https://yourdomain.com/webhook
+
+# Telegram Bot Token (get from @BotFather)
+BOT_TOKEN=your_telegram_bot_token
+# Alternative name used in some places
+# TELEGRAM_BOT_TOKEN=your_telegram_bot_token
+
+# JWT configuration for API authentication
+JWT_SECRET_KEY=your_jwt_secret_key
+JWT_ALGORITHM=HS256
+JWT_ACCESS_TOKEN_EXPIRE_MINUTES=30
+
+# Redis configuration for caching and task queues
+REDIS_HOST=localhost
+REDIS_PORT=6379
+REDIS_PASSWORD=your_redis_password
+REDIS_DB=0
+
+# API Key configuration
+API_KEY_SALT=change_in_production
+SITE_API_KEY=your_site_api_key
+BOT_API_KEY=your_bot_api_key
 ```
 
 ### Systemd сервисы
