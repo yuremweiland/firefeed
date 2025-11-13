@@ -5,9 +5,8 @@ import time
 import logging
 from logging_config import setup_logging
 from rss_manager import RSSManager
-from firefeed_dublicate_detector import FireFeedDuplicateDetector
-from firefeed_translator import FireFeedTranslator
-from firefeed_translator_task_queue import FireFeedTranslatorTaskQueue
+from di_container import setup_di_container, get_service
+from interfaces import IDuplicateDetector, ITranslationService, ITranslatorQueue
 from config import close_shared_db_pool
 
 setup_logging()
@@ -16,14 +15,16 @@ logger = logging.getLogger(__name__)
 
 class RSSParserService:
     def __init__(self):
-        self.duplicate_detector = FireFeedDuplicateDetector()
-        # --- Инициализация переводчика ---
-        self.translator = FireFeedTranslator(
-            device="cpu", max_workers=3, max_concurrent_translations=2, max_cached_models=3
-        )
-        self.translator_queue = FireFeedTranslatorTaskQueue(self.translator, max_workers=2, queue_size=30)
+        # Инициализируем DI контейнер
+        setup_di_container()
 
-        self.rss_manager = RSSManager(translator_queue=self.translator_queue)
+        # Получаем сервисы через DI
+        self.duplicate_detector = get_service(IDuplicateDetector)
+        self.translation_service = get_service(ITranslationService)
+        self.translator_queue = get_service(ITranslatorQueue)
+
+        # Создаем RSSManager через DI (он получит все зависимости автоматически)
+        self.rss_manager = RSSManager()
         self.running = True
         self.parse_task = None
         self.batch_processor_task = None
@@ -65,10 +66,14 @@ class RSSParserService:
         """Задача регулярной пакетной обработки"""
         try:
             logger.info("[BATCH] Запуск регулярной пакетной обработки новостей без эмбеддингов...")
-            success, errors = await self.duplicate_detector.process_missing_embeddings_batch(
-                batch_size=20, delay_between_items=0.2
-            )
-            logger.info(f"[BATCH] Регулярная пакетная обработки завершена. Успешно: {success}, Ошибок: {errors}")
+            # Используем новый интерфейс duplicate detector
+            if hasattr(self.duplicate_detector, 'process_missing_embeddings_batch'):
+                success, errors = await self.duplicate_detector.process_missing_embeddings_batch(
+                    batch_size=20, delay_between_items=0.2
+                )
+                logger.info(f"[BATCH] Регулярная пакетная обработки завершена. Успешно: {success}, Ошибок: {errors}")
+            else:
+                logger.warning("[BATCH] Duplicate detector не поддерживает пакетную обработку эмбеддингов")
         except Exception as e:
             logger.error(f"[ERROR] [BATCH] Ошибка в регулярной пакетной обработке: {e}")
             import traceback
@@ -149,8 +154,12 @@ class RSSParserService:
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(self._signal_handler(s)))
 
-        # Запускаем очередь переводов в этом же event loop
-        await self.translator_queue.start()
+        # Запускаем очередь переводов через DI сервис
+        if hasattr(self.translator_queue, 'start'):
+            await self.translator_queue.start()
+            logger.info("[RSS_PARSER] Очередь переводов запущена через DI")
+        else:
+            logger.warning("[RSS_PARSER] Translator queue не имеет метода start")
 
         # Создаем задачи
         self.parse_task = asyncio.create_task(self.parse_rss_task())
@@ -250,15 +259,18 @@ class RSSParserService:
             else:
                 logger.info("[RSS_PARSER] Все задачи успешно отменены.")
 
-        # --- Остановка очереди переводов и её потока ---
+        # --- Остановка очереди переводов через DI ---
         if hasattr(self, "translator_queue") and self.translator_queue:
-            logger.info("[RSS_PARSER] Остановка очереди переводов...")
+            logger.info("[RSS_PARSER] Остановка очереди переводов через DI...")
             try:
-                # Останавливаем очередь (это останавливает воркеров)
-                await self.translator_queue.stop()
-                logger.info("[RSS_PARSER] Очередь переводов остановлена.")
+                # Останавливаем очередь через DI сервис
+                if hasattr(self.translator_queue, 'stop'):
+                    await self.translator_queue.stop()
+                    logger.info("[RSS_PARSER] Очередь переводов остановлена через DI.")
+                else:
+                    logger.warning("[RSS_PARSER] Translator queue не имеет метода stop")
             except Exception as e:
-                logger.error(f"[RSS_PARSER] Ошибка при остановке очереди переводов: {e}")
+                logger.error(f"[RSS_PARSER] Ошибка при остановке очереди переводов через DI: {e}")
                 import traceback
 
                 traceback.print_exc()

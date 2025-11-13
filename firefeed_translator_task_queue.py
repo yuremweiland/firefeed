@@ -7,13 +7,17 @@ logger = logging.getLogger(__name__)
 
 
 class FireFeedTranslatorTaskQueue:
-    def __init__(self, translator, max_workers=1, queue_size=30):
+    def __init__(self, translator=None, max_workers=1, queue_size=30):
         self.translator = translator
         self.queue = Queue(maxsize=queue_size)
         self.max_workers = max_workers
         self.workers = []
         self.running = False
         self.stats = {"processed": 0, "errors": 0, "queued": 0}
+
+    def set_translator(self, translator):
+        """Set translator instance (for DI compatibility)"""
+        self.translator = translator
 
     async def start(self):
         """Запуск очереди задач"""
@@ -64,6 +68,10 @@ class FireFeedTranslatorTaskQueue:
 
     async def add_task(self, title, content, original_lang, callback=None, error_callback=None, task_id=None):
         """Добавление задачи перевода в очередь"""
+        if self.translator is None:
+            logger.error("[QUEUE] ❌ Translator not set, cannot add task")
+            return False
+
         task = {
             "data": {"title": title, "content": content, "original_lang": original_lang},
             "callback": callback,

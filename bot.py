@@ -118,6 +118,47 @@ async def get_translation_id(news_id: str, language: str) -> int:
         return None
 
 
+# --- Функции валидации изображений ---
+async def validate_image_url(image_url: str) -> bool:
+    """Проверяет доступность и корректность URL изображения."""
+    if not image_url:
+        return False
+
+    try:
+        # Делаем HEAD запрос для проверки доступности
+        timeout = aiohttp.ClientTimeout(total=5, connect=2)
+        async with http_session.head(image_url, timeout=timeout) as response:
+            if response.status != 200:
+                logger.debug(f"Изображение недоступно (status {response.status}): {image_url}")
+                return False
+
+            # Проверяем Content-Type
+            content_type = response.headers.get('Content-Type', '').lower()
+            if not content_type.startswith('image/'):
+                logger.debug(f"Некорректный Content-Type '{content_type}' для: {image_url}")
+                return False
+
+            # Проверяем размер (если указан)
+            content_length = response.headers.get('Content-Length')
+            if content_length:
+                try:
+                    size = int(content_length)
+                    if size > 10 * 1024 * 1024:  # 10 MB limit
+                        logger.debug(f"Изображение слишком большое ({size} bytes): {image_url}")
+                        return False
+                except (ValueError, TypeError):
+                    pass
+
+            return True
+
+    except asyncio.TimeoutError:
+        logger.debug(f"Таймаут при проверке изображения: {image_url}")
+        return False
+    except Exception as e:
+        logger.debug(f"Ошибка при проверке изображения {image_url}: {e}")
+        return False
+
+
 # --- Функции для работы с API ---
 async def api_get(endpoint: str, params: dict = None) -> dict:
     """Выполняет GET-запрос к API."""
@@ -217,14 +258,14 @@ async def set_current_user_language(user_id: int, lang: str):
         logger.error(f"Ошибка установки языка для {user_id}: {e}")
 
 
-async def cleanup_expired_user_data():
+async def cleanup_expired_user_data(context=None):
     """Очищает устаревшие данные пользователей (старше 24 часов)."""
     current_time = time.time()
     expired_threshold = current_time - USER_DATA_TTL_SECONDS
 
     # Очищаем USER_STATES
     expired_states = [uid for uid, data in USER_STATES.items()
-                     if isinstance(data, dict) and data.get("last_access", 0) < expired_threshold]
+                      if isinstance(data, dict) and data.get("last_access", 0) < expired_threshold]
     for uid in expired_states:
         del USER_STATES[uid]
 
@@ -598,13 +639,13 @@ async def send_personal_rss_items(bot, prepared_rss_item: PreparedRSSItem, subsc
             logger.debug(f"send_personal_rss_items image_filename = {image_filename}")
 
             if image_filename:
-                valid_image_url = re.match(
-                    r"^https?://.+\.(jpg|jpeg|png|gif|webp)(\?.*)?$", image_filename, re.IGNORECASE
-                )
-
-                if not valid_image_url:
-                    logger.warning(f"Недопустимый URL изображения для Telegram: {image_filename}")
-                    return  # Выходим из текущей итерации
+                # Проверяем доступность и корректность изображения
+                if await validate_image_url(image_filename):
+                    logger.debug(f"Изображение прошло валидацию: {image_filename}")
+                else:
+                    logger.warning(f"Изображение не прошло валидацию, отправляем без него: {image_filename}")
+                    image_filename = None  # Сбрасываем изображение
+                    continue  # Продолжаем без изображения
 
                 caption = content_text
                 if len(caption) > 1024:
@@ -621,6 +662,18 @@ async def send_personal_rss_items(bot, prepared_rss_item: PreparedRSSItem, subsc
                     logger.warning(f"Flood control для пользователя {user_id}, ждем {e.retry_after} секунд")
                     await asyncio.sleep(e.retry_after + 1)
                     await bot.send_photo(chat_id=user_id, photo=image_filename, caption=caption, parse_mode="HTML")
+                except BadRequest as e:
+                    if "Wrong type of the web page content" in str(e):
+                        logger.warning(f"Некорректный тип контента для пользователя {user_id}, отправляем без изображения: {image_filename}")
+                        # Отправляем без изображения
+                        try:
+                            await bot.send_message(
+                                chat_id=user_id, text=caption, parse_mode="HTML", disable_web_page_preview=True
+                            )
+                        except Exception as send_error:
+                            logger.error(f"Ошибка отправки сообщения пользователю {user_id}: {send_error}")
+                    else:
+                        logger.error(f"BadRequest при отправке фото пользователю {user_id}: {e}")
                 except Exception as e:
                     logger.error(f"Ошибка отправки фото пользователю {user_id}: {e}")
             else:
@@ -696,13 +749,12 @@ async def post_to_channel(bot, prepared_rss_item: PreparedRSSItem):
             logger.debug(f"post_to_channel image_filename = {image_filename}")
 
             if image_filename:
-                valid_image_url = re.match(
-                    r"^https?://.+\.(jpg|jpeg|png|gif|webp)(\?.*)?$", image_filename, re.IGNORECASE
-                )
-
-                if not valid_image_url:
-                    logger.warning(f"Недопустимый URL изображения для Telegram: {image_filename}")
-                    return
+                # Проверяем доступность и корректность изображения
+                if await validate_image_url(image_filename):
+                    logger.debug(f"Изображение прошло валидацию: {image_filename}")
+                else:
+                    logger.warning(f"Изображение не прошло валидацию, отправляем без него: {image_filename}")
+                    image_filename = None  # Сбрасываем изображение
 
                 caption = content_text
                 if len(caption) > 1024:
@@ -725,6 +777,21 @@ async def post_to_channel(bot, prepared_rss_item: PreparedRSSItem):
                         chat_id=channel_id, photo=image_filename, caption=caption, parse_mode="HTML"
                     )
                     message_id = message.message_id
+                except BadRequest as e:
+                    if "Wrong type of the web page content" in str(e):
+                        logger.warning(f"Некорректный тип контента для канала {channel_id}, отправляем без изображения: {image_filename}")
+                        # Отправляем без изображения
+                        try:
+                            message = await bot.send_message(
+                                chat_id=channel_id, text=content_text, parse_mode="HTML", disable_web_page_preview=True
+                            )
+                            message_id = message.message_id
+                        except Exception as send_error:
+                            logger.error(f"Ошибка отправки сообщения в канал {channel_id}: {send_error}")
+                            continue
+                    else:
+                        logger.error(f"BadRequest при отправке фото в канал {channel_id}: {e}")
+                        continue
                 except Exception as e:
                     logger.error(f"Ошибка отправки фото в канал {channel_id}: {e}")
                     continue
@@ -963,7 +1030,7 @@ def main():
     job_queue = application.job_queue
     if job_queue:
         job_queue.run_repeating(monitor_rss_items_task, interval=60, first=1, job_kwargs={"misfire_grace_time": 600})
-        job_queue.run_repeating(cleanup_expired_user_data(), interval=3600, first=60)
+        job_queue.run_repeating(cleanup_expired_user_data, interval=3600, first=60)
         logger.info("Зарегистрирована задача мониторинга RSS-элементов (каждую минуту)")
         logger.info("Зарегистрирована задача очистки устаревших данных пользователей (каждые 60 минут)")
 
