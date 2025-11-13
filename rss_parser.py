@@ -19,7 +19,7 @@ class RSSParserService:
         self.duplicate_detector = FireFeedDuplicateDetector()
         # --- Инициализация переводчика ---
         self.translator = FireFeedTranslator(
-            device="cpu", max_workers=3, max_concurrent_translations=2, max_cached_models=10
+            device="cpu", max_workers=3, max_concurrent_translations=2, max_cached_models=3
         )
         self.translator_queue = FireFeedTranslatorTaskQueue(self.translator, max_workers=2, queue_size=30)
 

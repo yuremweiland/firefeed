@@ -31,7 +31,7 @@ class CachedModel:
 
 
 class FireFeedTranslator:
-    def __init__(self, device="cpu", max_workers=4, max_concurrent_translations=3, max_cached_models=15):
+    def __init__(self, device="cpu", max_workers=4, max_concurrent_translations=3, max_cached_models=5):
         """
         Инициализация переводчика
         Args:

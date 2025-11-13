@@ -125,7 +125,9 @@ class ImageProcessor:
                     response.raise_for_status()
                     html_content = await response.text()
 
-            soup = BeautifulSoup(html_content, "html.parser")
+            import asyncio
+            loop = asyncio.get_event_loop()
+            soup = await loop.run_in_executor(None, BeautifulSoup, html_content, "html.parser")
 
             # Ищем og:image
             og_image = soup.find("meta", property="og:image")

@@ -9,6 +9,7 @@ import pytz
 import aiohttp
 from urllib.parse import urljoin, urlparse
 from utils.image import ImageProcessor
+from utils.media_extractors import extract_image_from_rss_item, extract_video_from_rss_item
 from config import IMAGES_ROOT_DIR, get_shared_db_pool, MAX_TOTAL_RSS_ITEMS, MAX_ENTRIES_PER_FEED, MAX_CONCURRENT_FEEDS
 import traceback
 
@@ -637,7 +638,7 @@ class RSSManager:
                     }
 
                     # - Извлечение и обработка изображения -
-                    image_url_from_rss = self.extract_image_from_rss_item(entry)
+                    image_url_from_rss = extract_image_from_rss_item(entry)
                     image_url_for_processing = image_url_from_rss
                     local_image_path = None
                     logger.debug(f"[RSS] [IMG] image_url_from_rss = {image_url_from_rss}")
@@ -702,7 +703,7 @@ class RSSManager:
                         logger.debug(f"[RSS] [IMG] Изображение не будет связано с элементом.")
 
                     # - Извлечение видео -
-                    video_url = self.extract_video_from_rss_item(entry)
+                    video_url = extract_video_from_rss_item(entry)
                     if video_url:
                         rss_item["video_url"] = video_url
                     else:
@@ -1051,132 +1052,6 @@ class RSSManager:
             traceback.print_exc()
             return False
 
-    # - МЕТОДЫ ИЗВЛЕЧЕНИЯ МЕДИА -
-    def extract_image_from_rss_item(self, item):
-        """Извлекает URL изображения из RSS item."""
-        try:
-            # 1. media:thumbnail (Atom)
-            media_thumbnail = item.get("media_thumbnail", [])
-            if media_thumbnail and isinstance(media_thumbnail, list) and len(media_thumbnail) > 0:
-                thumbnail = media_thumbnail[0]
-                if isinstance(thumbnail, dict):
-                    url = thumbnail.get("url")
-                    if url:
-                        logger.debug(f"[INFO] Найдено изображение в media:thumbnail: {url}")
-                        return url
-
-            # 2. enclosure с типом image/*
-            enclosures = item.get("enclosures", [])
-            if enclosures:
-                for enclosure in enclosures:
-                    if isinstance(enclosure, dict):
-                        content_type = enclosure.get("type", "")
-                        if content_type.startswith("image/"):
-                            url = enclosure.get("href") or enclosure.get("url")
-                            if url:
-                                logger.debug(f"[INFO] Найдено изображение в enclosure: {url}")
-                                return url
-
-            # 3. media:content с типом image/* (Atom)
-            media_content = item.get("media_content", [])
-            if media_content:
-                if isinstance(media_content, list):
-                    for content in media_content:
-                        if isinstance(content, dict) and content.get("medium") == "image":
-                            url = content.get("url")
-                            if url:
-                                logger.debug(f"[INFO] Найдено изображение в media:content (list): {url}")
-                                return url
-                elif isinstance(media_content, dict) and media_content.get("medium") == "image":
-                    url = media_content.get("url")
-                    if url:
-                        logger.debug(f"[INFO] Найдено изображение в media:content (dict): {url}")
-                        return url
-
-            # 4. og:image из links (если доступно)
-            # (Это менее надежно, так как требует парсинга HTML, который feedparser может не предоставить полностью)
-        except Exception as e:
-            logger.warning(f"[WARN] Ошибка при извлечении изображения из RSS item: {e}")
-        logger.debug("[INFO] Изображение не найдено в RSS item.")
-        return None
-
-    def extract_video_from_rss_item(self, item):
-        """Извлекает URL видео из RSS item."""
-        TELEGRAM_VIDEO_LIMIT = 50 * 1024 * 1024  # 50 МБ
-        try:
-            # 1. enclosure с типом video/* и проверкой размера
-            enclosures = item.get("enclosures", [])
-            if enclosures:
-                for enclosure in enclosures:
-                    if isinstance(enclosure, dict):
-                        content_type = enclosure.get("type", "")
-                        if content_type.startswith("video/"):
-                            url = enclosure.get("href") or enclosure.get("url")
-                            if url:
-                                # Проверяем размер, если доступен
-                                file_size = enclosure.get("length") or enclosure.get("filesize")
-                                size_ok = True
-                                if file_size is not None:
-                                    try:
-                                        file_size = int(file_size)
-                                        if file_size > TELEGRAM_VIDEO_LIMIT:
-                                            logger.debug(
-                                                f"[INFO] Видео превышает лимит размера Telegram ({file_size} > {TELEGRAM_VIDEO_LIMIT}): {url}"
-                                            )
-                                            size_ok = False
-                                    except (ValueError, TypeError):
-                                        pass  # Не удалось преобразовать размер
-                                if size_ok:
-                                    logger.debug(f"[INFO] Найдено видео в enclosure: {url}")
-                                    return url
-
-            # 2. media:content с типом video/* и проверкой размера (Atom)
-            media_content = item.get("media_content", [])
-            if media_content:
-                if isinstance(media_content, list):
-                    for content in media_content:
-                        if isinstance(content, dict) and content.get("medium") == "video":
-                            media_url = content.get("url")
-                            if media_url:
-                                # Проверяем размер, если доступен
-                                file_size = content.get("fileSize") or content.get("filesize")
-                                size_ok = True
-                                if file_size is not None:
-                                    try:
-                                        file_size = int(file_size)
-                                        if file_size > TELEGRAM_VIDEO_LIMIT:
-                                            logger.debug(
-                                                f"[INFO] Видео превышает лимит размера Telegram ({file_size} > {TELEGRAM_VIDEO_LIMIT}): {media_url}"
-                                            )
-                                            size_ok = False
-                                    except (ValueError, TypeError):
-                                        pass  # Не удалось преобразовать размер
-                                if size_ok:
-                                    logger.debug(f"[INFO] Найдено видео в media:content (list): {media_url}")
-                                    return media_url
-                elif isinstance(media_content, dict) and media_content.get("medium") == "video":
-                    media_url = media_content.get("url")
-                    if media_url:
-                        # Проверяем размер, если доступен
-                        file_size = media_content.get("fileSize") or media_content.get("filesize")
-                        size_ok = True
-                        if file_size is not None:
-                            try:
-                                file_size = int(file_size)
-                                if file_size > TELEGRAM_VIDEO_LIMIT:
-                                    logger.debug(
-                                        f"[INFO] Видео превышает лимит размера Telegram ({file_size} > {TELEGRAM_VIDEO_LIMIT}): {media_url}"
-                                    )
-                                    size_ok = False
-                            except (ValueError, TypeError):
-                                pass  # Не удалось преобразовать размер
-                        if size_ok:
-                            logger.debug(f"[INFO] Найдено видео в media:content (dict): {media_url}")
-                            return media_url
-        except Exception as e:
-            logger.warning(f"[WARN] Ошибка при извлечении видео из RSS item: {e}")
-        logger.debug("[INFO] Видео не найдено в RSS item.")
-        return None
 
     # - МЕТОДЫ ДЛЯ ТЕЛЕГРАМ-БОТА -
     async def fetch_unprocessed_rss_items(self):
