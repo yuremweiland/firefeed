@@ -8,7 +8,7 @@ from fastapi.security import OAuth2PasswordRequestForm
 from api.middleware import limiter
 from api import database, models
 from api.deps import create_access_token, verify_password, get_password_hash, ACCESS_TOKEN_EXPIRE_MINUTES
-from api.email_service.sender import send_verification_email
+from api.email_service.sender import send_verification_email, send_registration_success_email
 
 logger = logging.getLogger(__name__)
 
@@ -129,20 +129,37 @@ async def register_user(request: Request, user: models.UserCreate, background_ta
     }
 )
 @limiter.limit("300/minute")
-async def verify_user(request: models.EmailVerificationRequest):
+async def verify_user(request: Request, verification_request: models.EmailVerificationRequest, background_tasks: BackgroundTasks):
     pool = await database.get_db_pool()
     if pool is None:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Database error")
 
-    user = await database.get_user_by_email(pool, request.email)
+    user = await database.get_user_by_email(pool, verification_request.email)
     if not user:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid verification code or email")
     if user.get("is_active"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="User already verified")
 
-    ok = await database.activate_user_and_use_verification_code(pool, user["id"], request.code)
+    ok = await database.activate_user_and_use_verification_code(pool, user["id"], verification_request.code)
     if not ok:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid verification code or email")
+
+    async def _send_registration_success(email: str, lang: str):
+        start_ts = datetime.utcnow()
+        try:
+            ok = await send_registration_success_email(email, lang)
+            duration = (datetime.utcnow() - start_ts).total_seconds()
+            if duration > 10:
+                logger.warning(f"[RegistrationSuccessEmail] Slow send: {duration:.3f}s for {email}")
+            else:
+                logger.info(f"[RegistrationSuccessEmail] Sent in {duration:.3f}s for {email}")
+            if not ok:
+                logger.error(f"[RegistrationSuccessEmail] Failed to send to {email}")
+        except Exception as e:
+            duration = (datetime.utcnow() - start_ts).total_seconds()
+            logger.error(f"[RegistrationSuccessEmail] Exception after {duration:.3f}s for {email}: {e}")
+
+    background_tasks.add_task(_send_registration_success, verification_request.email, user.get("language", "en"))
 
     return models.SuccessResponse(message="User successfully verified")
 

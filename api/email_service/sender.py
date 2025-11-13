@@ -143,6 +143,66 @@ class EmailSender:
             logger.error(f"[EmailSender] Failed to send verification email to {to_email} after {duration:.3f}s: {str(e)}")
             return False
 
+    async def send_registration_success_email(self, to_email: str, language: str = "en") -> bool:
+        """
+        Отправляет email с поздравлением об успешной регистрации
+
+        Args:
+            to_email (str): Email получателя
+            language (str): Язык письма ('en', 'ru', 'de')
+
+        Returns:
+            bool: True если письмо отправлено успешно, False в случае ошибки
+        """
+        start_ts = datetime.utcnow()
+        logger.info(f"[EmailSender] Registration success email start: to={to_email} at {start_ts.isoformat()}Z")
+        try:
+            # Создаем сообщение
+            message = MIMEMultipart("alternative")
+            message["Subject"] = self._get_registration_success_subject(language)
+            message["From"] = self.sender_email
+            message["To"] = to_email
+
+            # Получаем содержимое письма из шаблонов
+            text_content = self._get_registration_success_text_content(language)
+            html_content = self._render_registration_success_html_template(language)
+
+            # Создаем части письма
+            text_part = MIMEText(text_content, "plain", "utf-8")
+            html_part = MIMEText(html_content, "html", "utf-8")
+
+            # Добавляем части в сообщение
+            message.attach(text_part)
+            message.attach(html_part)
+
+            # Отправляем email асинхронно с таймаутом 10 секунд
+            # Для порта 465 используем SSL, для других портов - TLS
+            use_ssl = self.smtp_config["port"] == 465
+            use_start_tls = self.smtp_config.get("use_tls", False) and not use_ssl
+
+            await send(
+                message,
+                hostname=self.smtp_config["server"],
+                port=self.smtp_config["port"],
+                username=self.sender_email,
+                password=self.smtp_config["password"],
+                start_tls=use_start_tls,
+                use_tls=use_ssl,
+                timeout=10,
+            )
+
+            duration = (datetime.utcnow() - start_ts).total_seconds()
+            if duration > 10:
+                logger.warning(f"[EmailSender] Registration success email slow ({duration:.3f}s) to {to_email}")
+            else:
+                logger.info(f"[EmailSender] Registration success email sent in {duration:.3f}s to {to_email}")
+            return True
+
+        except Exception as e:
+            duration = (datetime.utcnow() - start_ts).total_seconds()
+            logger.error(f"[EmailSender] Failed to send registration success email to {to_email} after {duration:.3f}s: {str(e)}")
+            return False
+
     def _get_reset_subject(self, language: str) -> str:
         """Возвращает тему письма сброса пароля в зависимости от языка"""
         subjects = {
@@ -288,6 +348,80 @@ FireFeed Team
             logger.error(f"Failed to render template {template_name}: {str(e)}")
             # Возвращаем базовый HTML контент если шаблон не найден
             return self._get_fallback_html_content(verification_code, language)
+
+    def _get_registration_success_subject(self, language: str) -> str:
+        """Возвращает тему письма успешной регистрации в зависимости от языка"""
+        subjects = {
+            "en": "FireFeed - Registration Successful",
+            "ru": "FireFeed - Регистрация успешна",
+            "de": "FireFeed - Registrierung erfolgreich",
+        }
+        return subjects.get(language, subjects["en"])
+
+    def _get_registration_success_text_content(self, language: str) -> str:
+        """Возвращает текстовую версию письма успешной регистрации"""
+        if language == "ru":
+            return f"""
+FireFeed - Регистрация успешна
+
+Поздравляем! Ваша учетная запись успешно верифицирована и активирована.
+
+Логин: Ваш email адрес
+Пароль: Был указан при регистрации
+
+Теперь вы можете войти в свою учетную запись и начать пользоваться всеми функциями нашего сервиса новостей.
+
+С уважением,
+Команда FireFeed
+            """.strip()
+        elif language == "de":
+            return f"""
+FireFeed - Registrierung erfolgreich
+
+Herzlichen Glückwunsch! Ihr Konto wurde erfolgreich verifiziert und aktiviert.
+
+Login: Ihre E-Mail-Adresse
+Passwort: Wie bei der Registrierung angegeben
+
+Sie können sich jetzt in Ihr Konto einloggen und alle Funktionen unseres Nachrichtendienstes nutzen.
+
+Mit freundlichen Grüßen,
+FireFeed Team
+            """.strip()
+        else:
+            return f"""
+FireFeed - Registration Successful
+
+Congratulations! Your account has been successfully verified and activated.
+
+Login: Your email address
+Password: As specified during registration
+
+You can now log in to your account and start using all the features of our news service.
+
+Best regards,
+FireFeed Team
+            """.strip()
+
+    def _render_registration_success_html_template(self, language: str) -> str:
+        """Рендерит HTML шаблон успешной регистрации с помощью Jinja2"""
+        # Определяем имя файла шаблона
+        template_files = {
+            "en": "registration_success_email_en.html",
+            "ru": "registration_success_email_ru.html",
+            "de": "registration_success_email_de.html",
+        }
+
+        template_name = template_files.get(language, template_files["en"])
+
+        try:
+            # Загружаем и рендерим шаблон
+            template = self.jinja_env.get_template(template_name)
+            return template.render(current_year=datetime.now().year)
+        except Exception as e:
+            logger.error(f"Failed to render template {template_name}: {str(e)}")
+            # Возвращаем базовый HTML контент если шаблон не найден
+            return self._get_fallback_registration_success_html_content(language)
 
     def _get_fallback_html_content(self, verification_code: str, language: str) -> str:
         """Возвращает базовый HTML контент если шаблон не найден"""
@@ -508,6 +642,124 @@ FireFeed Team
 </html>
             """.strip()
 
+    def _get_fallback_registration_success_html_content(self, language: str) -> str:
+        """Возвращает базовый HTML контент для успешной регистрации если шаблон не найден"""
+        year = datetime.now().year
+        if language == "ru":
+            return f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>FireFeed - Регистрация успешна</title>
+</head>
+<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+    <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+        <div style="text-align: center; margin-bottom: 30px;">
+            <h1 style="color: #ff6b35;">🔥 FireFeed</h1>
+        </div>
+
+        <div style="background-color: #f9f9f9; padding: 30px; border-radius: 10px; border-left: 4px solid #ff6b35;">
+            <h2 style="color: #333; margin-top: 0;">Добро пожаловать в FireFeed!</h2>
+
+            <p>Поздравляем! Ваша учетная запись успешно верифицирована и активирована.</p>
+
+            <div style="background-color: #fff; padding: 20px; border-radius: 5px; margin: 20px 0;">
+                <p style="margin: 0; font-size: 16px; color: #666;"><strong>Логин:</strong> Ваш email адрес</p>
+                <p style="margin: 10px 0 0 0; font-size: 16px; color: #666;"><strong>Пароль:</strong> Был указан при регистрации</p>
+            </div>
+
+            <p>Теперь вы можете войти в свою учетную запись и начать пользоваться всеми функциями нашего сервиса новостей.</p>
+
+            <div style="text-align: center; margin: 30px 0;">
+                <a href="https://firefeed.net/login" style="display: inline-block; background-color: #ff6b35; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold;">Войти в учетную запись</a>
+            </div>
+        </div>
+
+        <div style="text-align: center; margin-top: 30px; color: #999; font-size: 12px;">
+            <p>© {year} FireFeed. Все права защищены.</p>
+        </div>
+    </div>
+</body>
+</html>
+            """.strip()
+        elif language == "de":
+            return f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>FireFeed - Registrierung erfolgreich</title>
+</head>
+<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+    <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+        <div style="text-align: center; margin-bottom: 30px;">
+            <h1 style="color: #ff6b35;">🔥 FireFeed</h1>
+        </div>
+
+        <div style="background-color: #f9f9f9; padding: 30px; border-radius: 10px; border-left: 4px solid #ff6b35;">
+            <h2 style="color: #333; margin-top: 0;">Willkommen bei FireFeed!</h2>
+
+            <p>Herzlichen Glückwunsch! Ihr Konto wurde erfolgreich verifiziert und aktiviert.</p>
+
+            <div style="background-color: #fff; padding: 20px; border-radius: 5px; margin: 20px 0;">
+                <p style="margin: 0; font-size: 16px; color: #666;"><strong>Login:</strong> Ihre E-Mail-Adresse</p>
+                <p style="margin: 10px 0 0 0; font-size: 16px; color: #666;"><strong>Passwort:</strong> Wie bei der Registrierung angegeben</p>
+            </div>
+
+            <p>Sie können sich jetzt in Ihr Konto einloggen und alle Funktionen unseres Nachrichtendienstes nutzen.</p>
+
+            <div style="text-align: center; margin: 30px 0;">
+                <a href="https://firefeed.net/login" style="display: inline-block; background-color: #ff6b35; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold;">In Ihr Konto einloggen</a>
+            </div>
+        </div>
+
+        <div style="text-align: center; margin-top: 30px; color: #999; font-size: 12px;">
+            <p>© {year} FireFeed. Alle Rechte vorbehalten.</p>
+        </div>
+    </div>
+</body>
+</html>
+            """.strip()
+        else:
+            return f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>FireFeed - Registration Successful</title>
+</head>
+<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+    <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+        <div style="text-align: center; margin-bottom: 30px;">
+            <h1 style="color: #ff6b35;">🔥 FireFeed</h1>
+        </div>
+
+        <div style="background-color: #f9f9f9; padding: 30px; border-radius: 10px; border-left: 4px solid #ff6b35;">
+            <h2 style="color: #333; margin-top: 0;">Welcome to FireFeed!</h2>
+
+            <p>Congratulations! Your account has been successfully verified and activated.</p>
+
+            <div style="background-color: #fff; padding: 20px; border-radius: 5px; margin: 20px 0;">
+                <p style="margin: 0; font-size: 16px; color: #666;"><strong>Login:</strong> Your email address</p>
+                <p style="margin: 10px 0 0 0; font-size: 16px; color: #666;"><strong>Password:</strong> As specified during registration</p>
+            </div>
+
+            <p>You can now log in to your account and start using all the features of our news service.</p>
+
+            <div style="text-align: center; margin: 30px 0;">
+                <a href="https://firefeed.net/login" style="display: inline-block; background-color: #ff6b35; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold;">Log In to Your Account</a>
+            </div>
+        </div>
+
+        <div style="text-align: center; margin-top: 30px; color: #999; font-size: 12px;">
+            <p>© {year} FireFeed. All rights reserved.</p>
+        </div>
+    </div>
+</body>
+</html>
+            """.strip()
+
 
 # Создаем глобальный экземпляр отправщика
 email_sender = EmailSender()
@@ -542,3 +794,17 @@ async def send_password_reset_email(to_email: str, reset_token: str, language: s
         bool: True если письмо отправлено успешно, False в случае ошибки
     """
     return await email_sender.send_password_reset_email(to_email, reset_token, language)
+
+
+async def send_registration_success_email(to_email: str, language: str = "en") -> bool:
+    """
+    Удобная функция для отправки email с поздравлением об успешной регистрации
+
+    Args:
+        to_email (str): Email получателя
+        language (str): Язык письма ('en', 'ru', 'de')
+
+    Returns:
+        bool: True если письмо отправлено успешно, False в случае ошибки
+    """
+    return await email_sender.send_registration_success_email(to_email, language)
