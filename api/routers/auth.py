@@ -137,7 +137,7 @@ async def verify_user(request: Request, verification_request: models.EmailVerifi
     user = await database.get_user_by_email(pool, verification_request.email)
     if not user:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid verification code or email")
-    if user.get("is_active"):
+    if user.get("is_verified"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="User already verified")
 
     ok = await database.activate_user_and_use_verification_code(pool, user["id"], verification_request.code)
@@ -210,10 +210,10 @@ async def login_user(request: Request, form_data: OAuth2PasswordRequestForm = De
     if not verify_password(form_data.password, user["password_hash"]):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password")
 
-    if not user.get("is_active"):
+    if not user.get("is_verified") or user.get("is_deleted"):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Account not verified. Please check your email for verification code.",
+            detail="Account not verified or deactivated.",
         )
 
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)

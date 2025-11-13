@@ -39,12 +39,12 @@ async def create_user(pool, email: str, password_hash: str, language: str) -> Op
         async with conn.cursor() as cur:
             try:
                 query = """
-                INSERT INTO users (email, password_hash, language, is_active, created_at, updated_at)
-                VALUES (%s, %s, %s, %s, %s, %s)
-                RETURNING id, email, language, is_active, created_at, updated_at
+                INSERT INTO users (email, password_hash, language, is_active, is_verified, is_deleted, created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                RETURNING id, email, language, is_active, is_verified, is_deleted, created_at, updated_at
                 """
                 now = datetime.utcnow()
-                await cur.execute(query, (email, password_hash, language, False, now, now))
+                await cur.execute(query, (email, password_hash, language, False, False, False, now, now))
                 result = await cur.fetchone()
                 if result:
                     columns = [desc[0] for desc in cur.description]
@@ -61,7 +61,7 @@ async def get_user_by_email(pool, email: str) -> Optional[Dict[str, Any]]:
         async with conn.cursor() as cur:
             try:
                 query = """
-                SELECT id, email, password_hash, language, is_active, created_at, updated_at
+                SELECT id, email, password_hash, language, is_active, is_verified, is_deleted, created_at, updated_at
                 FROM users WHERE email = %s
                 """
                 await cur.execute(query, (email,))
@@ -81,7 +81,7 @@ async def get_user_by_id(pool, user_id: int) -> Optional[Dict[str, Any]]:
         async with conn.cursor() as cur:
             try:
                 query = """
-                SELECT id, email, password_hash, language, is_active, created_at, updated_at
+                SELECT id, email, password_hash, language, is_active, is_verified, is_deleted, created_at, updated_at
                 FROM users WHERE id = %s
                 """
                 await cur.execute(query, (user_id,))
@@ -114,7 +114,7 @@ async def update_user(pool, user_id: int, update_data: Dict[str, Any]) -> Option
                 UPDATE users
                 SET {', '.join(set_parts)}, updated_at = %s
                 WHERE id = %s
-                RETURNING id, email, password_hash, language, is_active, created_at, updated_at
+                RETURNING id, email, password_hash, language, is_active, is_verified, is_deleted, created_at, updated_at
                 """
                 params.append(datetime.utcnow())  # updated_at
                 await cur.execute(query, params)
@@ -134,7 +134,7 @@ async def delete_user(pool, user_id: int) -> bool:
         async with conn.cursor() as cur:
             try:
                 # Вместо физического удаления деактивируем
-                query = "UPDATE users SET is_active = FALSE, updated_at = %s WHERE id = %s"
+                query = "UPDATE users SET is_deleted = TRUE, updated_at = %s WHERE id = %s"
                 await cur.execute(query, (datetime.utcnow(), user_id))
                 # Проверяем, была ли затронута строка
                 if cur.rowcount > 0:
@@ -1110,7 +1110,7 @@ async def activate_user_and_use_verification_code(pool, user_id: int, verificati
                 if not rec:
                     await cur.execute("ROLLBACK")
                     return False
-                await cur.execute("UPDATE users SET is_active = TRUE WHERE id = %s", (user_id,))
+                await cur.execute("UPDATE users SET is_active = TRUE, is_verified = TRUE WHERE id = %s", (user_id,))
                 await cur.execute("UPDATE user_verification_codes SET used_at = NOW() WHERE id = %s", (rec[0],))
                 await cur.execute("COMMIT")
                 return True

@@ -322,6 +322,14 @@ async def get_current_user_by_api_key(request: Request):
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
+        # Check if user is verified and not deleted
+        if not user_data.get("is_verified") or user_data.get("is_deleted"):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Account not verified or deactivated",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
         # Return user data with API key info
         user_data["api_key_data"] = api_key_data
         return user_data

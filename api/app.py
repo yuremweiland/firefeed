@@ -14,6 +14,7 @@ from api.routers import rss as rss_router
 from api.routers import api_keys as api_keys_router
 from api.websocket import router as ws_router, check_for_new_rss_items
 from api import database
+from utils.cleanup import periodic_cleanup_users
 from logging_config import setup_logging
 
 setup_logging()
@@ -124,6 +125,10 @@ async def startup_event():
 
     asyncio.create_task(check_for_new_rss_items())
     logger.info("[Startup] RSS items checking task started")
+
+    # Start background user cleanup task
+    asyncio.create_task(periodic_cleanup_users())
+    logger.info("[Startup] User cleanup task started")
 
 
 @app.on_event("shutdown")
