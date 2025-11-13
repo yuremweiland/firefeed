@@ -117,6 +117,12 @@ class EmailVerificationRequest(BaseModel):
     code: str = Field(..., min_length=6, max_length=6, description="6-digit verification code")
 
 
+class ResendVerificationRequest(BaseModel):
+    """Модель для запроса повторной отправки кода верификации."""
+
+    email: EmailStr
+
+
 class SuccessResponse(BaseModel):
     """Модель для ответа об успешной операции."""
 

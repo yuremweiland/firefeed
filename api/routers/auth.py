@@ -165,6 +165,71 @@ async def verify_user(request: Request, verification_request: models.EmailVerifi
 
 
 @router.post(
+    "/resend-verification",
+    response_model=models.SuccessResponse,
+    summary="Resend verification code",
+    description="""
+    Resend verification code to user's email if account is not verified yet.
+
+    **Process:**
+    1. Validate email exists and user is not verified
+    2. Generate new verification code
+    3. Send verification email
+
+    **Rate limit:** 5 requests per minute
+    """,
+    responses={
+        200: {
+            "description": "Verification code resent",
+            "model": models.SuccessResponse
+        },
+        400: {
+            "description": "Bad Request - Email not found or already verified",
+            "model": models.HTTPError
+        },
+        429: {"description": "Too Many Requests - Rate limit exceeded"},
+        500: {"description": "Internal Server Error"}
+    }
+)
+@limiter.limit("5/minute")
+async def resend_verification(request: Request, resend_request: models.ResendVerificationRequest, background_tasks: BackgroundTasks):
+    pool = await database.get_db_pool()
+    if pool is None:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Database error")
+
+    user = await database.get_user_by_email(pool, resend_request.email)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email not found")
+    if user.get("is_verified"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="User already verified")
+
+    verification_code = "".join(random.choices("0123456789", k=6))
+    expires_at = datetime.utcnow() + timedelta(hours=24)
+    ok = await database.save_verification_code(pool, user["id"], verification_code, expires_at)
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create verification code")
+
+    async def _send_verification(email: str, code: str, lang: str):
+        start_ts = datetime.utcnow()
+        try:
+            ok = await send_verification_email(email, code, lang)
+            duration = (datetime.utcnow() - start_ts).total_seconds()
+            if duration > 10:
+                logger.warning(f"[VerificationEmail] Slow send: {duration:.3f}s for {email}")
+            else:
+                logger.info(f"[VerificationEmail] Sent in {duration:.3f}s for {email}")
+            if not ok:
+                logger.error(f"[VerificationEmail] Failed to send to {email}")
+        except Exception as e:
+            duration = (datetime.utcnow() - start_ts).total_seconds()
+            logger.error(f"[VerificationEmail] Exception after {duration:.3f}s for {email}: {e}")
+
+    background_tasks.add_task(_send_verification, resend_request.email, verification_code, user.get("language", "en"))
+
+    return models.SuccessResponse(message="Verification code sent")
+
+
+@router.post(
     "/login",
     response_model=models.Token,
     summary="Authenticate user",
