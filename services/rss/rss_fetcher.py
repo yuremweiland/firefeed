@@ -63,9 +63,17 @@ class RSSFetcher(IRSSFetcher):
         logger.info(f"[RSS] Starting fetch: {feed_name} ({url})")
 
         try:
-            # Parse RSS feed
+            # Fetch RSS feed content with UTF-8 encoding to handle encoding issues
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=headers) as response:
+                    if response.status != 200:
+                        logger.error(f"[RSS] HTTP error for {feed_name}: {response.status}")
+                        return []
+                    content = await response.text(encoding='utf-8')
+
+            # Parse RSS feed from content
             loop = asyncio.get_event_loop()
-            feed = await loop.run_in_executor(None, feedparser.parse, url)
+            feed = await loop.run_in_executor(None, feedparser.parse, content)
 
             if feed.bozo:
                 logger.error(f"[RSS] Parse error for {feed_name}: {feed.bozo_exception}")
@@ -123,8 +131,8 @@ class RSSFetcher(IRSSFetcher):
             news_id = self.generate_news_id(title, content, link, feed_info["id"])
 
             # Extract media
-            image_url = self.media_extractor.extract_image(entry)
-            video_url = self.media_extractor.extract_video(entry)
+            image_url = await self.media_extractor.extract_image(entry)
+            video_url = await self.media_extractor.extract_video(entry)
 
             # Process image if found
             image_filename = None

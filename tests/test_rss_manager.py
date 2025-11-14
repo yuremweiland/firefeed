@@ -276,35 +276,35 @@ class TestRSSManager:
         result = await rss_manager.save_translations_to_db("test_news_id", "invalid")
         assert result is False
 
-    def test_extract_image_from_rss_item_media_thumbnail(self):
+    async def test_extract_image_from_rss_item_media_thumbnail(self):
         item = {
             "media_thumbnail": [{"url": "http://example.com/image.jpg"}]
         }
-        result = extract_image_from_rss_item(item)
+        result = await extract_image_from_rss_item(item)
         assert result == "http://example.com/image.jpg"
 
-    def test_extract_image_from_rss_item_enclosure(self):
+    async def test_extract_image_from_rss_item_enclosure(self):
         item = {
             "enclosures": [{"type": "image/jpeg", "href": "http://example.com/image.jpg"}]
         }
-        result = extract_image_from_rss_item(item)
+        result = await extract_image_from_rss_item(item)
         assert result == "http://example.com/image.jpg"
 
-    def test_extract_image_from_rss_item_no_image(self):
+    async def test_extract_image_from_rss_item_no_image(self):
         item = {"title": "Test Item"}
-        result = extract_image_from_rss_item(item)
+        result = await extract_image_from_rss_item(item)
         assert result is None
 
-    def test_extract_video_from_rss_item_enclosure(self):
+    async def test_extract_video_from_rss_item_enclosure(self):
         item = {
             "enclosures": [{"type": "video/mp4", "href": "http://example.com/video.mp4"}]
         }
-        result = extract_video_from_rss_item(item)
+        result = await extract_video_from_rss_item(item)
         assert result == "http://example.com/video.mp4"
 
-    def test_extract_video_from_rss_item_no_video(self):
+    async def test_extract_video_from_rss_item_no_video(self):
         item = {"title": "Test Item"}
-        result = extract_video_from_rss_item(item)
+        result = await extract_video_from_rss_item(item)
         assert result is None
 
     async def test_fetch_unprocessed_rss_items_success(self, rss_manager, mock_pool, mock_conn, mock_cur):

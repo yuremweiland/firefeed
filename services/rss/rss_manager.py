@@ -201,9 +201,9 @@ class RSSManager:
         """Check for duplicates - delegate to fetcher"""
         return await self.rss_fetcher.check_for_duplicates(title, content, link, lang)
 
-    def extract_image_from_rss_item(self, item: Dict[str, Any]) -> Optional[str]:
+    async def extract_image_from_rss_item(self, item: Dict[str, Any]) -> Optional[str]:
         """Extract image - delegate to media extractor"""
-        return self.media_extractor.extract_image(item)
+        return await self.media_extractor.extract_image(item)
 
     def extract_video_from_rss_item(self, item: Dict[str, Any]) -> Optional[str]:
         """Extract video - delegate to media extractor"""

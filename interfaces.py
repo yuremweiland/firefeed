@@ -110,12 +110,12 @@ class IMediaExtractor(ABC):
     """Interface for media extraction from RSS items"""
 
     @abstractmethod
-    def extract_image(self, rss_item: Dict[str, Any]) -> Optional[str]:
+    async def extract_image(self, rss_item: Dict[str, Any]) -> Optional[str]:
         """Extract image URL from RSS item"""
         pass
 
     @abstractmethod
-    def extract_video(self, rss_item: Dict[str, Any]) -> Optional[str]:
+    async def extract_video(self, rss_item: Dict[str, Any]) -> Optional[str]:
         """Extract video URL from RSS item"""
         pass
 

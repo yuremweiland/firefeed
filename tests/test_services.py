@@ -41,8 +41,8 @@ class TestRSSServices:
     def mock_media_extractor(self):
         """Mock media extractor"""
         extractor = MagicMock(spec=IMediaExtractor)
-        extractor.extract_image.return_value = "http://example.com/image.jpg"
-        extractor.extract_video.return_value = None
+        extractor.extract_image = AsyncMock(return_value="http://example.com/image.jpg")
+        extractor.extract_video = AsyncMock(return_value=None)
         return extractor
 
     @pytest.fixture
@@ -105,37 +105,37 @@ class TestTranslationServices:
 class TestMediaExtractor:
     """Test media extractor"""
 
-    def test_extract_image_from_rss_item(self):
+    async def test_extract_image_from_rss_item(self):
         """Test image extraction from RSS item"""
         extractor = MediaExtractor()
 
         # Test with media_thumbnail
         item = {"media_thumbnail": [{"url": "http://example.com/image.jpg"}]}
-        result = extractor.extract_image(item)
+        result = await extractor.extract_image(item)
         assert result == "http://example.com/image.jpg"
 
         # Test with enclosure
         item = {"enclosures": [{"type": "image/jpeg", "href": "http://example.com/image2.jpg"}]}
-        result = extractor.extract_image(item)
+        result = await extractor.extract_image(item)
         assert result == "http://example.com/image2.jpg"
 
         # Test no image
         item = {"title": "Test"}
-        result = extractor.extract_image(item)
+        result = await extractor.extract_image(item)
         assert result is None
 
-    def test_extract_video_from_rss_item(self):
+    async def test_extract_video_from_rss_item(self):
         """Test video extraction from RSS item"""
         extractor = MediaExtractor()
 
         # Test with enclosure
         item = {"enclosures": [{"type": "video/mp4", "href": "http://example.com/video.mp4"}]}
-        result = extractor.extract_video(item)
+        result = await extractor.extract_video(item)
         assert result == "http://example.com/video.mp4"
 
         # Test no video
         item = {"title": "Test"}
-        result = extractor.extract_video(item)
+        result = await extractor.extract_video(item)
         assert result is None
 
 

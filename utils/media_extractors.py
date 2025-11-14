@@ -1,10 +1,12 @@
 # utils/media_extractors.py
 import logging
+import asyncio
+from utils.image import ImageProcessor
 
 logger = logging.getLogger(__name__)
 
 
-def _extract_media_from_rss_item(item, media_type, size_limit=None):
+async def _extract_media_from_rss_item(item, media_type, size_limit=None):
     """Extracts media URL from RSS item."""
     try:
         # 1. media:thumbnail (Atom) - images only
@@ -93,7 +95,7 @@ def _extract_media_from_rss_item(item, media_type, size_limit=None):
     return None
 
 
-def extract_image_from_rss_item(item):
+async def extract_image_from_rss_item(item):
     """Extracts image URL from RSS item with extended format support."""
     try:
         # 1. enclosure with image/* type
@@ -179,8 +181,19 @@ def extract_image_from_rss_item(item):
     except Exception as e:
         logger.warning(f"[WARN] Error extracting image from RSS item: {e}")
 
+    # 7. Fallback: extract from web preview if no image found in RSS
+    if not image_url:
+        news_link = item.get('link')
+        if news_link:
+            try:
+                image_url = await ImageProcessor.extract_image_from_preview(news_link)
+                if image_url:
+                    logger.debug(f"[INFO] Found image in web preview: {image_url}")
+            except Exception as e:
+                logger.warning(f"[WARN] Error extracting image from web preview for {news_link}: {e}")
+
     logger.debug("[INFO] Image not found in RSS item.")
-    return None
+    return image_url
 
 
 def _has_image_extension(url):
@@ -189,7 +202,7 @@ def _has_image_extension(url):
     return bool(re.search(r'\.(jpe?g|png|gif|webp|bmp|tiff?|svg)(\?.*)?$', url, re.IGNORECASE))
 
 
-def extract_video_from_rss_item(item):
+async def extract_video_from_rss_item(item):
     """Extracts video URL from RSS item with extended format support."""
     try:
         # 1. enclosure with video/* type and size check
@@ -232,7 +245,7 @@ def extract_video_from_rss_item(item):
                     return url
 
         # Use common function for remaining checks
-        return _extract_media_from_rss_item(item, "video", 50 * 1024 * 1024)
+        return await _extract_media_from_rss_item(item, "video", 50 * 1024 * 1024)
 
     except Exception as e:
         logger.warning(f"[WARN] Error extracting video from RSS item: {e}")
