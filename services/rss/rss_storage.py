@@ -25,6 +25,7 @@ class RSSStorage(IRSSStorage):
                     content = rss_item["content"]
                     original_language = rss_item["lang"]
                     image_filename = rss_item.get("image_filename")
+                    video_filename = rss_item.get("video_filename")
                     category_name = rss_item["category"]
                     source_name = rss_item["source"]
                     source_url = rss_item["link"]
@@ -41,21 +42,22 @@ class RSSStorage(IRSSStorage):
                     query = """
                     INSERT INTO published_news_data
                     (news_id, original_title, original_content, original_language, category_id,
-                     image_filename, rss_feed_id, source_url, created_at, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                     image_filename, video_filename, rss_feed_id, source_url, created_at, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
                     ON CONFLICT (news_id) DO UPDATE SET
                     original_title = EXCLUDED.original_title,
                     original_content = EXCLUDED.original_content,
                     original_language = EXCLUDED.original_language,
                     category_id = EXCLUDED.category_id,
                     image_filename = EXCLUDED.image_filename,
+                    video_filename = EXCLUDED.video_filename,
                     rss_feed_id = EXCLUDED.rss_feed_id,
                     source_url = EXCLUDED.source_url,
                     updated_at = NOW()
                     """
                     await cur.execute(query, (
                         news_id, title, content, original_language, category_id,
-                        image_filename, feed_id, source_url
+                        image_filename, video_filename, feed_id, source_url
                     ))
 
                     logger.info(f"[STORAGE] RSS item saved: {short_id}")
@@ -419,6 +421,7 @@ class RSSStorage(IRSSStorage):
                         p.original_language,
                         p.category_id,
                         p.image_filename,
+                        p.video_filename,
                         p.source_url,
                         c.name as category_name,
                         rf.name as feed_name,
@@ -440,10 +443,11 @@ class RSSStorage(IRSSStorage):
                             "language": row[3],
                             "category_id": row[4],
                             "image_filename": row[5],
-                            "source_url": row[6],
-                            "category": row[7],
-                            "feed_name": row[8],
-                            "feed_id": row[9]
+                            "video_filename": row[6],
+                            "source_url": row[7],
+                            "category": row[8],
+                            "feed_name": row[9],
+                            "feed_id": row[10]
                         })
                     logger.info(f"Found {len(items)} unprocessed RSS items")
                     return items

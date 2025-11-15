@@ -19,6 +19,8 @@ class RSSItem(BaseModel):
     original_content: str
     original_language: str
     image_url: Optional[str] = None
+    video_url: Optional[str] = None
+    image_url: Optional[str] = None
     category: Optional[str] = None
     source: Optional[str] = None  # News source name
     source_url: Optional[str] = None

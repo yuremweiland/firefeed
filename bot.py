@@ -5,6 +5,7 @@ import os
 import re
 import sys
 import time
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional
@@ -16,7 +17,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 from tenacity import retry, stop_after_attempt, wait_exponential
 from utils.text import TextProcessor
 
-from config import WEBHOOK_CONFIG, BOT_TOKEN, CHANNEL_IDS, CHANNEL_CATEGORIES, get_shared_db_pool
+from config import WEBHOOK_CONFIG, BOT_TOKEN, CHANNEL_IDS, CHANNEL_CATEGORIES, get_shared_db_pool, RSS_PARSER_MEDIA_TYPE_PRIORITY, HTTP_IMAGES_ROOT_DIR, HTTP_VIDEOS_ROOT_DIR
 from firefeed_translations import get_message, LANG_NAMES, TRANSLATED_FROM_LABELS, READ_MORE_LABELS, SOURCE_LABELS
 from logging_config import setup_logging
 from user_manager import UserManager
@@ -35,6 +36,7 @@ USER_CURRENT_MENUS = {}  # {user_id: "main", "last_access": timestamp}
 USER_LANGUAGES = {}  # {user_id: "en", "last_access": timestamp}
 SEND_SEMAPHORE = asyncio.Semaphore(5)
 RSS_ITEM_PROCESSING_SEMAPHORE = asyncio.Semaphore(10)
+FEED_LOCKS = {}  # {feed_id: asyncio.Lock} for feed-level locking
 
 user_manager = None
 http_session = None  # Global session for HTTP requests
@@ -50,6 +52,7 @@ class PreparedRSSItem:
     original_data: Dict[str, Any]
     translations: Dict[str, Dict[str, str]]
     image_filename: Optional[str]
+    video_filename: Optional[str]
     feed_id: int
 
 
@@ -719,17 +722,39 @@ async def send_personal_rss_items(bot, prepared_rss_item: PreparedRSSItem, subsc
                 f"CATEGORY: {category}\n{lang_note}\n"
                 f"⚡ <a href='{prepared_rss_item.original_data.get('link', '#')}'>{READ_MORE_LABELS.get(user_lang, 'Read more')}</a>"
             )
-            image_filename = prepared_rss_item.image_filename
-            logger.debug(f"send_personal_rss_items image_filename = {image_filename}")
+            # Determine media based on priority
+            priority = RSS_PARSER_MEDIA_TYPE_PRIORITY.lower()
+            media_filename = None
+            media_type = None
 
-            if image_filename:
+            if priority == "image":
+                if prepared_rss_item.image_filename:
+                    media_filename = prepared_rss_item.image_filename
+                    media_type = "image"
+                elif prepared_rss_item.video_filename:
+                    media_filename = prepared_rss_item.video_filename
+                    media_type = "video"
+            elif priority == "video":
+                if prepared_rss_item.video_filename:
+                    media_filename = prepared_rss_item.video_filename
+                    media_type = "video"
+                elif prepared_rss_item.image_filename:
+                    media_filename = prepared_rss_item.image_filename
+                    media_type = "image"
+
+            logger.debug(f"send_personal_rss_items media_filename = {media_filename}, media_type = {media_type}")
+
+            if media_filename and media_type == "image":
                 # Check image availability and correctness
-                if await validate_image_url(image_filename):
-                    logger.debug(f"Image passed validation: {image_filename}")
+                if await validate_image_url(media_filename):
+                    logger.debug(f"Image passed validation: {media_filename}")
                 else:
-                    logger.warning(f"Image failed validation, sending without it: {image_filename}")
-                    image_filename = None  # Reset image
-                    continue  # Continue without image
+                    logger.warning(f"Image failed validation, sending without it: {media_filename}")
+                    media_filename = None  # Reset media
+                    continue  # Continue without media
+            elif media_filename and media_type == "video":
+                # For video, we assume it's already validated during processing
+                logger.debug(f"Using video: {media_filename}")
 
                 caption = content_text
                 if len(caption) > 1024:
@@ -741,15 +766,21 @@ async def send_personal_rss_items(bot, prepared_rss_item: PreparedRSSItem, subsc
                     else:
                         caption = caption[:1021] + "..."
                 try:
-                    await bot.send_photo(chat_id=user_id, photo=image_filename, caption=caption, parse_mode="HTML")
+                    if media_type == "image":
+                        await bot.send_photo(chat_id=user_id, photo=media_filename, caption=caption, parse_mode="HTML")
+                    elif media_type == "video":
+                        await bot.send_video(chat_id=user_id, video=media_filename, caption=caption, parse_mode="HTML")
                 except RetryAfter as e:
                     logger.warning(f"Flood control for user {user_id}, waiting {e.retry_after} seconds")
                     await asyncio.sleep(e.retry_after + 1)
-                    await bot.send_photo(chat_id=user_id, photo=image_filename, caption=caption, parse_mode="HTML")
+                    if media_type == "image":
+                        await bot.send_photo(chat_id=user_id, photo=media_filename, caption=caption, parse_mode="HTML")
+                    elif media_type == "video":
+                        await bot.send_video(chat_id=user_id, video=media_filename, caption=caption, parse_mode="HTML")
                 except BadRequest as e:
                     if "Wrong type of the web page content" in str(e):
-                        logger.warning(f"Incorrect content type for user {user_id}, sending without image: {image_filename}")
-                        # Send without image
+                        logger.warning(f"Incorrect content type for user {user_id}, sending without media: {media_filename}")
+                        # Send without media
                         try:
                             await bot.send_message(
                                 chat_id=user_id, text=caption, parse_mode="HTML", disable_web_page_preview=True
@@ -757,9 +788,9 @@ async def send_personal_rss_items(bot, prepared_rss_item: PreparedRSSItem, subsc
                         except Exception as send_error:
                             logger.error(f"Error sending message to user {user_id}: {send_error}")
                     else:
-                        logger.error(f"BadRequest when sending photo to user {user_id}: {e}")
+                        logger.error(f"BadRequest when sending media to user {user_id}: {e}")
                 except Exception as e:
-                    logger.error(f"Error sending photo to user {user_id}: {e}")
+                    logger.error(f"Error sending media to user {user_id}: {e}")
             else:
                 try:
                     await bot.send_message(
@@ -786,27 +817,34 @@ async def post_to_channel(bot, prepared_rss_item: PreparedRSSItem):
     original_title = prepared_rss_item.original_data["title"]
     news_id = prepared_rss_item.original_data.get("id")
     feed_id = prepared_rss_item.feed_id
-    logger.info(f"Publishing RSS item to channels: {original_title[:50]}...")
 
-    # Check Telegram publication limits
-    cooldown_minutes, max_news_per_hour = await get_feed_cooldown_and_max_news(feed_id)
-    recent_telegram_count = await get_recent_telegram_publications_count(feed_id, cooldown_minutes)
+    # Get or create feed lock
+    if feed_id not in FEED_LOCKS:
+        FEED_LOCKS[feed_id] = asyncio.Lock()
+    feed_lock = FEED_LOCKS[feed_id]
 
-    if recent_telegram_count >= max_news_per_hour:
-        logger.info(f"[SKIP] Feed {feed_id} reached Telegram publication limit {max_news_per_hour} in {cooldown_minutes} minutes. Published: {recent_telegram_count}")
-        return
+    async with feed_lock:
+        logger.info(f"Publishing RSS item to channels: {original_title[:50]}...")
 
-    # Check time-based limit
-    last_telegram_time = await get_last_telegram_publication_time(feed_id)
-    if last_telegram_time:
-        elapsed = datetime.now(timezone.utc) - last_telegram_time
-        min_interval = timedelta(minutes=60 / max_news_per_hour)
-        cooldown_limit = timedelta(minutes=cooldown_minutes)
-        effective_limit = min(min_interval, cooldown_limit)
-        if elapsed < effective_limit:
-            remaining_time = effective_limit - elapsed
-            logger.info(f"[SKIP] Feed {feed_id} on Telegram cooldown. Remaining: {remaining_time}")
+        # Check Telegram publication limits
+        cooldown_minutes, max_news_per_hour = await get_feed_cooldown_and_max_news(feed_id)
+        recent_telegram_count = await get_recent_telegram_publications_count(feed_id, cooldown_minutes)
+
+        if recent_telegram_count >= max_news_per_hour:
+            logger.info(f"[SKIP] Feed {feed_id} reached Telegram publication limit {max_news_per_hour} in {cooldown_minutes} minutes. Published: {recent_telegram_count}")
             return
+
+        # Check time-based limit
+        last_telegram_time = await get_last_telegram_publication_time(feed_id)
+        if last_telegram_time:
+            elapsed = datetime.now(timezone.utc) - last_telegram_time
+            min_interval = timedelta(minutes=60 / max_news_per_hour)
+            cooldown_limit = timedelta(minutes=cooldown_minutes)
+            effective_limit = min(min_interval, cooldown_limit)
+            if elapsed < effective_limit:
+                remaining_time = effective_limit - elapsed
+                logger.info(f"[SKIP] Feed {feed_id} on Telegram cooldown. Remaining: {remaining_time}")
+                return
 
     logger.debug(f"post_to_channel prepared_rss_item = {prepared_rss_item}")
     original_content = prepared_rss_item.original_data.get("content", "")
@@ -851,12 +889,31 @@ async def post_to_channel(bot, prepared_rss_item: PreparedRSSItem):
             if source_url:
                 content_text += f"\n🔗 <a href=\"{source_url}\">{SOURCE_LABELS.get(target_lang, 'Source')}</a>\n"
             content_text += f"{lang_note}{hashtags}"
-            image_filename = prepared_rss_item.image_filename
-            logger.debug(f"post_to_channel image_filename = {image_filename}")
+            # Determine media based on priority
+            priority = RSS_PARSER_MEDIA_TYPE_PRIORITY.lower()
+            media_filename = None
+            media_type = None
 
-            if image_filename and await validate_image_url(image_filename):
-                # Image passed validation - send with photo
-                logger.debug(f"Image passed validation: {image_filename}")
+            if priority == "image":
+                if prepared_rss_item.image_filename:
+                    media_filename = prepared_rss_item.image_filename
+                    media_type = "image"
+                elif prepared_rss_item.video_filename:
+                    media_filename = prepared_rss_item.video_filename
+                    media_type = "video"
+            elif priority == "video":
+                if prepared_rss_item.video_filename:
+                    media_filename = prepared_rss_item.video_filename
+                    media_type = "video"
+                elif prepared_rss_item.image_filename:
+                    media_filename = prepared_rss_item.image_filename
+                    media_type = "image"
+
+            logger.debug(f"post_to_channel media_filename = {media_filename}, media_type = {media_type}")
+
+            if media_filename and ((media_type == "image" and await validate_image_url(media_filename)) or media_type == "video"):
+                # Media passed validation - send with appropriate method
+                logger.debug(f"Media passed validation: {media_filename}")
 
                 caption = content_text
                 if len(caption) > 1024:
@@ -868,21 +925,31 @@ async def post_to_channel(bot, prepared_rss_item: PreparedRSSItem):
                     else:
                         caption = caption[:1021] + "..."
                 try:
-                    message = await bot.send_photo(
-                        chat_id=channel_id, photo=image_filename, caption=caption, parse_mode="HTML"
-                    )
+                    if media_type == "image":
+                        message = await bot.send_photo(
+                            chat_id=channel_id, photo=media_filename, caption=caption, parse_mode="HTML"
+                        )
+                    elif media_type == "video":
+                        message = await bot.send_video(
+                            chat_id=channel_id, video=media_filename, caption=caption, parse_mode="HTML"
+                        )
                     message_id = message.message_id
                 except RetryAfter as e:
                     logger.warning(f"Flood control for channel {channel_id}, waiting {e.retry_after} seconds")
                     await asyncio.sleep(e.retry_after + 1)
-                    message = await bot.send_photo(
-                        chat_id=channel_id, photo=image_filename, caption=caption, parse_mode="HTML"
-                    )
+                    if media_type == "image":
+                        message = await bot.send_photo(
+                            chat_id=channel_id, photo=media_filename, caption=caption, parse_mode="HTML"
+                        )
+                    elif media_type == "video":
+                        message = await bot.send_video(
+                            chat_id=channel_id, video=media_filename, caption=caption, parse_mode="HTML"
+                        )
                     message_id = message.message_id
                 except BadRequest as e:
                     if "Wrong type of the web page content" in str(e):
-                        logger.warning(f"Incorrect content type for channel {channel_id}, sending without image: {image_filename}")
-                        # Send without image
+                        logger.warning(f"Incorrect content type for channel {channel_id}, sending without media: {media_filename}")
+                        # Send without media
                         try:
                             message = await bot.send_message(
                                 chat_id=channel_id, text=content_text, parse_mode="HTML", disable_web_page_preview=True
@@ -892,15 +959,15 @@ async def post_to_channel(bot, prepared_rss_item: PreparedRSSItem):
                             logger.error(f"Error sending message to channel {channel_id}: {send_error}")
                             continue
                     else:
-                        logger.error(f"BadRequest when sending photo to channel {channel_id}: {e}")
+                        logger.error(f"BadRequest when sending media to channel {channel_id}: {e}")
                         continue
                 except Exception as e:
-                    logger.error(f"Error sending photo to channel {channel_id}: {e}")
+                    logger.error(f"Error sending media to channel {channel_id}: {e}")
                     continue
             else:
-                # No image or it failed validation - send text only
-                if image_filename:
-                    logger.warning(f"Image failed validation, sending without it: {image_filename}")
+                # No media or it failed validation - send text only
+                if media_filename:
+                    logger.warning(f"Media failed validation, sending without it: {media_filename}")
                 try:
                     message = await bot.send_message(
                         chat_id=channel_id, text=content_text, parse_mode="HTML", disable_web_page_preview=True
@@ -931,6 +998,12 @@ async def post_to_channel(bot, prepared_rss_item: PreparedRSSItem):
             await asyncio.sleep(5)
         except Exception as e:
             logger.error(f"Error sending to {channel_id}: {e}")
+
+        # Add delay after publication to enforce time-based limits
+        if max_news_per_hour > 0:
+            delay_seconds = 60 / max_news_per_hour
+            logger.info(f"Adding {delay_seconds} seconds delay after publication for feed {feed_id}")
+            await asyncio.sleep(delay_seconds)
 
 
 # --- Main RSS item processing logic ---
@@ -970,6 +1043,7 @@ async def process_rss_item(context, rss_item_from_api, subscribers_cache=None, c
             original_data=original_data,
             translations=translations,
             image_filename=original_data.get("image_url"),  # because that's how API returns
+            video_filename=rss_item_from_api.get("video_filename"),
             feed_id=rss_item_from_api.get("feed_id"),
         )
 
@@ -1021,6 +1095,15 @@ async def monitor_rss_items_task(context: ContextTypes.DEFAULT_TYPE):
             logger.info("No RSS items to process.")
             return
 
+        # Group RSS items by feed_id
+        items_by_feed = defaultdict(list)
+        for rss_item in unprocessed_rss_list:
+            feed_id = rss_item.get("feed_id")
+            if feed_id:
+                items_by_feed[feed_id].append(rss_item)
+
+        logger.info(f"Grouped into {len(items_by_feed)} feeds")
+
         # Collect unique categories to optimize subscriber queries
         unique_categories = set()
         for rss_item in unprocessed_rss_list:
@@ -1044,14 +1127,17 @@ async def monitor_rss_items_task(context: ContextTypes.DEFAULT_TYPE):
             else:
                 logger.info(f"Category '{category}' is NOT suitable for general channel")
 
-        processing_tasks = [process_rss_item(context, rss_item, subscribers_cache, channel_categories_cache) for rss_item in unprocessed_rss_list]
+        # Process feeds sequentially
+        for feed_id, feed_items in items_by_feed.items():
+            logger.info(f"Processing feed {feed_id} with {len(feed_items)} items")
+            # Process items within feed sequentially
+            for rss_item in feed_items:
+                try:
+                    await process_rss_item(context, rss_item, subscribers_cache, channel_categories_cache)
+                except Exception as e:
+                    logger.error(f"Error processing RSS item {rss_item.get('news_id')} from feed {feed_id}: {e}")
 
-        logger.info(f"Starting processing of {len(processing_tasks)} RSS items...")
-        try:
-            await asyncio.gather(*processing_tasks, return_exceptions=True)
-            logger.info("All RSS items from current batch processed.")
-        except Exception as e:
-            logger.error(f"Error processing batch of RSS items: {e}")
+        logger.info("All RSS items from current batch processed.")
 
     except asyncio.TimeoutError:
         logger.error("Timeout getting RSS items")

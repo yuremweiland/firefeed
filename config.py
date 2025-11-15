@@ -105,10 +105,18 @@ MAX_WEBSOCKET_CONNECTIONS = 1000
 RSS_ITEM_SIMILARITY_THRESHOLD = 0.9
 # Absolute path to images directory on server
 IMAGES_ROOT_DIR = "/var/www/firefeed/data/www/firefeed.net/data/images/"
+# Absolute path to videos directory on server
+VIDEOS_ROOT_DIR = "/var/www/firefeed/data/www/firefeed.net/data/videos/"
+# Absolute path to videos directory on website
+HTTP_VIDEOS_ROOT_DIR = "https://firefeed.net/data/videos/"
 # Absolute path to images directory on website
 HTTP_IMAGES_ROOT_DIR = "https://firefeed.net/data/images/"
+# RSS parser media type priority (image or video)
+RSS_PARSER_MEDIA_TYPE_PRIORITY = os.getenv("RSS_PARSER_MEDIA_TYPE_PRIORITY", "image")
 # Allowed image extensions
 IMAGE_FILE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".gif", ".webp"]
+# Allowed video extensions
+VIDEO_FILE_EXTENSIONS = [".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv", ".webm", ".m4v"]
 
 VERIFICATION_CODE_EXPIRE_HOURS = 1
 
