@@ -97,6 +97,7 @@ async def _extract_media_from_rss_item(item, media_type, size_limit=None):
 
 async def extract_image_from_rss_item(item):
     """Extracts image URL from RSS item with extended format support."""
+    image_url = None
     try:
         # 1. enclosure with image/* type
         enclosures = item.get("enclosures", [])
