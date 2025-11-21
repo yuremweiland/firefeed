@@ -18,16 +18,17 @@ router = APIRouter(
 )
 
 
-def process_rss_items_results(results, columns, display_language, original_language, include_all_translations):
+def process_rss_items_results(results, columns, display_language, include_all_translations):
     rss_items_list = []
     for row in results:
         row_dict = dict(zip(columns, row))
-        translations = build_translations_dict(row_dict)
-        if display_language is not None and original_language and display_language != original_language:
+        translations = build_translations_dict(row_dict, display_language)
+        row_original_language = row_dict["original_language"]
+        if display_language is not None and row_original_language and display_language != row_original_language:
             if not translations or display_language not in translations:
                 continue
-        if display_language is not None and original_language:
-            translations[original_language] = {
+        if display_language is not None and row_original_language:
+            translations[row_original_language] = {
                 "title": row_dict["original_title"],
                 "content": row_dict["original_content"],
             }
@@ -198,7 +199,7 @@ async def get_rss_items(
         logger.error(f"[API] Error executing query in get_rss_items: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
-    rss_items_list = process_rss_items_results(results, columns, display_language, original_language, include_all_translations)
+    rss_items_list = process_rss_items_results(results, columns, display_language, include_all_translations)
     return {"count": len(rss_items_list), "results": rss_items_list}
 
 

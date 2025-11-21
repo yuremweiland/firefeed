@@ -134,7 +134,7 @@ def get_full_image_url(image_filename: str) -> str:
     return f"{base_url}/{filename}"
 
 
-def build_translations_dict(row_dict):
+def build_translations_dict(row_dict, display_language=None):
     translations = {}
     languages = ["ru", "en", "de", "fr"]
     original_language = row_dict.get("original_language")
@@ -149,6 +149,14 @@ def build_translations_dict(row_dict):
             content = row_dict.get("original_content")
         if title is not None or content is not None:
             translations[lang] = {"title": title, "content": content}
+
+    # Handle display_language if provided and not already in translations
+    if display_language and display_language not in translations:
+        display_title = row_dict.get("display_title")
+        display_content = row_dict.get("display_content")
+        if display_title is not None or display_content is not None:
+            translations[display_language] = {"title": display_title, "content": display_content}
+
     return translations
 
 
